@@ -174,8 +174,10 @@ public:
 
     std::vector<lsp::CallHierarchyItem> prepareCallHierarchy(
         const lsp::CallHierarchyPrepareParams& params, const LSPCancellationToken& cancellationToken);
-    std::vector<lsp::CallHierarchyIncomingCall> callHierarchyIncomingCalls(const lsp::CallHierarchyIncomingCallsParams& params);
-    std::vector<lsp::CallHierarchyOutgoingCall> callHierarchyOutgoingCalls(const lsp::CallHierarchyOutgoingCallsParams& params);
+    std::vector<lsp::CallHierarchyIncomingCall> callHierarchyIncomingCalls(
+        const lsp::CallHierarchyIncomingCallsParams& params, const LSPCancellationToken& cancellationToken);
+    std::vector<lsp::CallHierarchyOutgoingCall> callHierarchyOutgoingCalls(
+        const lsp::CallHierarchyOutgoingCallsParams& params, const LSPCancellationToken& cancellationToken);
 
     std::optional<std::vector<lsp::DocumentSymbol>> documentSymbol(const lsp::DocumentSymbolParams& params);
     std::optional<std::vector<lsp::WorkspaceSymbol>> workspaceSymbol(const lsp::WorkspaceSymbolParams& params);

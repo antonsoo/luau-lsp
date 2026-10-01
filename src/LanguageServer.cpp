@@ -307,14 +307,14 @@ void LanguageServer::onRequest(const id_type& id, const std::string& method, std
         ASSERT_PARAMS(baseParams, "callHierarchy/incomingCalls")
         auto params = baseParams->get<lsp::CallHierarchyIncomingCallsParams>();
         auto workspace = findWorkspace(params.item.uri);
-        response = workspace->callHierarchyIncomingCalls(params);
+        response = workspace->callHierarchyIncomingCalls(params, cancellationToken);
     }
     else if (method == "callHierarchy/outgoingCalls")
     {
         ASSERT_PARAMS(baseParams, "callHierarchy/outgoingCalls")
         auto params = baseParams->get<lsp::CallHierarchyOutgoingCallsParams>();
         auto workspace = findWorkspace(params.item.uri);
-        response = workspace->callHierarchyOutgoingCalls(params);
+        response = workspace->callHierarchyOutgoingCalls(params, cancellationToken);
     }
     else if (method == "textDocument/foldingRange")
     {

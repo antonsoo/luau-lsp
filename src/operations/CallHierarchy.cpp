@@ -140,7 +140,8 @@ std::vector<lsp::CallHierarchyItem> WorkspaceFolder::prepareCallHierarchy(
 
     if (auto local = exprOrLocal.getLocal())
     {
-        ty = scope->lookup(local).value_or(nullptr);
+        if (auto localTy = scope->lookup(local))
+            ty = Luau::follow(*localTy);
     }
     else if (auto type = module->astTypes.find(exprOrLocal.getExpr()))
     {
@@ -183,7 +184,8 @@ std::vector<lsp::CallHierarchyItem> WorkspaceFolder::prepareCallHierarchy(
         return {};
 }
 
-std::vector<lsp::CallHierarchyIncomingCall> WorkspaceFolder::callHierarchyIncomingCalls(const lsp::CallHierarchyIncomingCallsParams& params)
+std::vector<lsp::CallHierarchyIncomingCall> WorkspaceFolder::callHierarchyIncomingCalls(
+    const lsp::CallHierarchyIncomingCallsParams& params, const LSPCancellationToken& cancellationToken)
 {
     auto moduleName = fileResolver.getModuleName(params.item.uri);
 
@@ -192,6 +194,10 @@ std::vector<lsp::CallHierarchyIncomingCall> WorkspaceFolder::callHierarchyIncomi
     if (!textDocument)
         throw JsonRpcException(lsp::ErrorCode::RequestFailed, "No text document available for " + params.item.uri.toString());
     auto position = textDocument->convertPosition(params.item.selectionRange.start);
+
+    // Run the type checker to ensure we are up to date
+    checkStrict(moduleName, cancellationToken);
+    throwIfCancelled(cancellationToken);
 
     // Find the definition of the original function, to determine the appropriate TypeId to lookup
     auto sourceModule = frontend.getSourceModule(moduleName);
@@ -217,6 +223,11 @@ std::vector<lsp::CallHierarchyIncomingCall> WorkspaceFolder::callHierarchyIncomi
     // For each module, search for callers
     for (const auto& dependentModuleName : dependents)
     {
+        // Run the typechecker over the dependent module. A type graph retained from an earlier check can reference types
+        // of a module that has since been rechecked
+        checkStrict(dependentModuleName, cancellationToken);
+        throwIfCancelled(cancellationToken);
+
         auto dependentSourceModule = frontend.getSourceModule(dependentModuleName);
         auto dependentModule = getModule(dependentModuleName, /* forAutocomplete: */ true);
         if (!dependentSourceModule || !dependentModule)
@@ -298,7 +309,8 @@ std::vector<lsp::CallHierarchyIncomingCall> WorkspaceFolder::callHierarchyIncomi
 
     return result;
 }
-std::vector<lsp::CallHierarchyOutgoingCall> WorkspaceFolder::callHierarchyOutgoingCalls(const lsp::CallHierarchyOutgoingCallsParams& params)
+std::vector<lsp::CallHierarchyOutgoingCall> WorkspaceFolder::callHierarchyOutgoingCalls(
+    const lsp::CallHierarchyOutgoingCallsParams& params, const LSPCancellationToken& cancellationToken)
 {
     auto moduleName = fileResolver.getModuleName(params.item.uri);
 
@@ -307,6 +319,10 @@ std::vector<lsp::CallHierarchyOutgoingCall> WorkspaceFolder::callHierarchyOutgoi
     if (!textDocument)
         throw JsonRpcException(lsp::ErrorCode::RequestFailed, "No text document available for " + params.item.uri.toString());
     auto position = textDocument->convertPosition(params.item.selectionRange.start);
+
+    // Run the type checker to ensure we are up to date
+    checkStrict(moduleName, cancellationToken);
+    throwIfCancelled(cancellationToken);
 
     // Find the original function in the file
     auto sourceModule = frontend.getSourceModule(moduleName);

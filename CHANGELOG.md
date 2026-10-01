@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed a use-after-free crash in Call Hierarchy when incoming or outgoing calls are requested after a required module has changed. The modules involved are now type checked first, so incoming calls also include callers in files that had not been checked yet
+- Fixed Call Hierarchy not being offered on a local function when the new solver is enabled
+
 ## [1.70.1] - 2026-09-27
 
 ### Added
