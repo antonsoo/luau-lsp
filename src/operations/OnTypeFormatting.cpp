@@ -123,6 +123,9 @@ lsp::DocumentOnTypeFormattingResult WorkspaceFolder::onTypeFormatting(const lsp:
 
     auto position = textDocument->convertPosition(params.position);
 
+    // Ensure string locations reflect the keystroke that triggered this request
+    frontend.parse(moduleName);
+
     auto sourceModule = frontend.getSourceModule(moduleName);
     if (!sourceModule)
         return std::nullopt;

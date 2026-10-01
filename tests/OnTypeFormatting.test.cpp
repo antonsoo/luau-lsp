@@ -17,6 +17,26 @@ static lsp::DocumentOnTypeFormattingResult processOnTypeFormatting(Fixture* fixt
     return fixture->workspace.onTypeFormatting(params);
 }
 
+// Types `source` into a document that was last parsed as `parsedSource`
+static lsp::DocumentOnTypeFormattingResult processOnTypeFormattingAfterEdit(
+    Fixture* fixture, const std::string& parsedSource, const std::string& source, const lsp::Position& position)
+{
+    // Enable pull-based diagnostics, otherwise updateTextDocument will trigger a diagnostic check
+    fixture->client->capabilities.textDocument = lsp::TextDocumentClientCapabilities{};
+    fixture->client->capabilities.textDocument->diagnostic = lsp::DiagnosticClientCapabilities{};
+
+    auto uri = fixture->newDocument("foo.luau", parsedSource);
+    fixture->updateDocument(uri, source);
+
+    lsp::DocumentOnTypeFormattingParams params;
+    params.textDocument.uri = uri;
+    params.position = position;
+    params.ch = "{";
+    params.options = {4, true};
+
+    return fixture->workspace.onTypeFormatting(params);
+}
+
 TEST_CASE_FIXTURE(Fixture, "on_type_formatting_disabled_by_default")
 {
     auto [source, marker] = sourceWithMarker(R"(
@@ -114,6 +134,82 @@ TEST_CASE_FIXTURE(Fixture, "on_type_formatting_handles_escaped_quote_in_unfinish
     CHECK_EQ(applyEdit(source, edits.value()), R"(
         print(`aaa \"bbb {
     )");
+}
+
+TEST_CASE_FIXTURE(Fixture, "on_type_formatting_converts_quotes_when_bracket_typed_at_end_of_string")
+{
+    client->globalConfig.format.convertQuotes = true;
+    auto [source, marker] = sourceWithMarker(R"(local x = "aaa {|}")");
+
+    auto edits = processOnTypeFormattingAfterEdit(this, R"(local x = "aaa ")", source, marker);
+    REQUIRE(edits.has_value());
+    REQUIRE(edits->size() == 2);
+
+    CHECK_EQ(applyEdit(source, edits.value()), "local x = `aaa {}`");
+}
+
+TEST_CASE_FIXTURE(Fixture, "on_type_formatting_converts_quotes_when_bracket_typed_in_middle_of_string")
+{
+    client->globalConfig.format.convertQuotes = true;
+    auto [source, marker] = sourceWithMarker(R"(local x = "aaa {|}bbb")");
+
+    auto edits = processOnTypeFormattingAfterEdit(this, R"(local x = "aaa bbb")", source, marker);
+    REQUIRE(edits.has_value());
+    REQUIRE(edits->size() == 2);
+
+    CHECK_EQ(applyEdit(source, edits.value()), "local x = `aaa {}bbb`");
+}
+
+TEST_CASE_FIXTURE(Fixture, "on_type_formatting_converts_quotes_of_string_typed_since_last_parse")
+{
+    client->globalConfig.format.convertQuotes = true;
+    auto [source, marker] = sourceWithMarker(R"(local x = "aaa {|}")");
+
+    auto edits = processOnTypeFormattingAfterEdit(this, "local x = ", source, marker);
+    REQUIRE(edits.has_value());
+    REQUIRE(edits->size() == 2);
+
+    CHECK_EQ(applyEdit(source, edits.value()), "local x = `aaa {}`");
+}
+
+TEST_CASE_FIXTURE(Fixture, "on_type_formatting_converts_quotes_when_string_moved_since_last_parse")
+{
+    client->globalConfig.format.convertQuotes = true;
+    auto [source, marker] = sourceWithMarker(R"(local y = 1; print("aaa {|}bbb"))");
+
+    auto edits = processOnTypeFormattingAfterEdit(this, R"(print("aaa bbb"))", source, marker);
+    REQUIRE(edits.has_value());
+    REQUIRE(edits->size() == 2);
+
+    CHECK_EQ(applyEdit(source, edits.value()), "local y = 1; print(`aaa {}bbb`)");
+}
+
+TEST_CASE_FIXTURE(Fixture, "on_type_formatting_converts_quotes_when_string_moved_to_another_line")
+{
+    client->globalConfig.format.convertQuotes = true;
+    auto [source, marker] = sourceWithMarker("local y = 1\nprint(\"hello {|}world\")");
+
+    auto edits = processOnTypeFormattingAfterEdit(this, R"(print("hello world"))", source, marker);
+    REQUIRE(edits.has_value());
+    REQUIRE(edits->size() == 2);
+
+    CHECK_EQ(applyEdit(source, edits.value()), "local y = 1\nprint(`hello {}world`)");
+}
+
+TEST_CASE_FIXTURE(Fixture, "on_type_formatting_converts_quotes_after_edit_with_utf16_positions")
+{
+    client->globalConfig.format.convertQuotes = true;
+    std::string source = "local x = \"\U0001F600\"; print(\"hi \U0001F600{}\u4E16\u754C\")";
+
+    // The cursor and edits use UTF-16 columns, not UTF-8 bytes or Unicode code points.
+    auto edits = processOnTypeFormattingAfterEdit(this, R"(print("hello world"))", source, {0, 29});
+    REQUIRE(edits.has_value());
+    REQUIRE(edits->size() == 2);
+
+    CHECK_EQ(edits->at(0).range, lsp::Range{{0, 22}, {0, 23}});
+    CHECK_EQ(edits->at(1).range, lsp::Range{{0, 32}, {0, 33}});
+    CHECK_EQ(edits->at(0).newText, "`");
+    CHECK_EQ(edits->at(1).newText, "`");
 }
 
 TEST_CASE_FIXTURE(Fixture, "on_type_formatting_ignores_backtick_content")
