@@ -123,6 +123,9 @@ lsp::DocumentOnTypeFormattingResult WorkspaceFolder::onTypeFormatting(const lsp:
 
     auto position = textDocument->convertPosition(params.position);
 
+    // The request follows the keystroke that triggered it, so the last parsed AST does not contain that edit yet
+    frontend.parse(moduleName);
+
     auto sourceModule = frontend.getSourceModule(moduleName);
     if (!sourceModule)
         return std::nullopt;
