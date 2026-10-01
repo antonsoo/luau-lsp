@@ -70,6 +70,120 @@ bool isNoOpFunction(const Luau::AstExprFunction* func)
     return func->body->body.size == 0;
 }
 
+// Finds types whose printed form is not a valid annotation. The generics that inference gives a function are printed
+// as `a` or `b...`, but an annotation naming them is an unknown type unless it is written inside a function type that
+// declares them, such as `<a>(a) -> a`.
+struct UnnameableTypeFinder
+{
+    // Generics declared by the function types we are currently inside
+    std::vector<const void*> declaredGenerics;
+    std::vector<Luau::TypeId> visiting;
+
+    bool isDeclared(const void* generic) const
+    {
+        return std::find(declaredGenerics.begin(), declaredGenerics.end(), generic) != declaredGenerics.end();
+    }
+
+    bool find(Luau::TypeId ty)
+    {
+        ty = Luau::follow(ty);
+
+        if (auto generic = Luau::get<Luau::GenericType>(ty))
+            return !generic->explicitName && !isDeclared(ty);
+        // Negations appear in refined types (`string & ~"init"`), and have no syntax
+        if (Luau::get<Luau::FreeType>(ty) || Luau::get<Luau::NegationType>(ty))
+            return true;
+
+        if (std::find(visiting.begin(), visiting.end(), ty) != visiting.end())
+            return false;
+        visiting.push_back(ty);
+        bool found = findInChildren(ty);
+        visiting.pop_back();
+        return found;
+    }
+
+    bool find(Luau::TypePackId tp)
+    {
+        tp = Luau::follow(tp);
+
+        if (auto generic = Luau::get<Luau::GenericTypePack>(tp))
+            return !generic->explicitName && !isDeclared(tp);
+        if (Luau::get<Luau::FreeTypePack>(tp))
+            return true;
+
+        if (auto pack = Luau::get<Luau::TypePack>(tp))
+        {
+            for (auto ty : pack->head)
+                if (find(ty))
+                    return true;
+            return pack->tail && find(*pack->tail);
+        }
+        if (auto variadic = Luau::get<Luau::VariadicTypePack>(tp))
+            return find(variadic->ty);
+
+        return false;
+    }
+
+private:
+    bool findInChildren(Luau::TypeId ty)
+    {
+        if (auto ftv = Luau::get<Luau::FunctionType>(ty))
+        {
+            size_t previousSize = declaredGenerics.size();
+            for (auto generic : ftv->generics)
+                declaredGenerics.push_back(Luau::follow(generic));
+            for (auto genericPack : ftv->genericPacks)
+                declaredGenerics.push_back(Luau::follow(genericPack));
+            bool found = find(ftv->argTypes) || find(ftv->retTypes);
+            declaredGenerics.resize(previousSize);
+            return found;
+        }
+        if (auto ttv = Luau::get<Luau::TableType>(ty))
+        {
+            // A named table is printed as its name and type arguments
+            if (ttv->name || ttv->syntheticName)
+            {
+                for (auto param : ttv->instantiatedTypeParams)
+                    if (find(param))
+                        return true;
+                for (auto param : ttv->instantiatedTypePackParams)
+                    if (find(param))
+                        return true;
+                return false;
+            }
+
+            for (const auto& [_, prop] : ttv->props)
+                if ((prop.readTy && find(*prop.readTy)) || (prop.writeTy && find(*prop.writeTy)))
+                    return true;
+            return ttv->indexer && (find(ttv->indexer->indexType) || find(ttv->indexer->indexResultType));
+        }
+        if (auto mtv = Luau::get<Luau::MetatableType>(ty))
+            return !mtv->syntheticName && (find(mtv->table) || find(mtv->metatable));
+        if (auto utv = Luau::get<Luau::UnionType>(ty))
+        {
+            for (auto option : utv->options)
+                if (find(option))
+                    return true;
+        }
+        else if (auto itv = Luau::get<Luau::IntersectionType>(ty))
+        {
+            for (auto part : itv->parts)
+                if (find(part))
+                    return true;
+        }
+        else if (auto tfit = Luau::get<Luau::TypeFunctionInstanceType>(ty))
+        {
+            for (auto argument : tfit->typeArguments)
+                if (find(argument))
+                    return true;
+            for (auto argument : tfit->packArguments)
+                if (find(argument))
+                    return true;
+        }
+        return false;
+    }
+};
+
 // Adds a text edit onto the hint so that it can be inserted.
 void makeInsertable(const ClientConfiguration& config, lsp::InlayHint& hint, Luau::TypeId ty)
 {
@@ -80,6 +194,8 @@ void makeInsertable(const ClientConfiguration& config, lsp::InlayHint& hint, Lua
     auto result = Luau::toStringDetailed(ty, opts);
     if (result.invalid || result.truncated || result.error || result.cycle)
         return;
+    if (UnnameableTypeFinder{}.find(ty))
+        return;
     hint.textEdits.emplace_back(lsp::TextEdit{{hint.position, hint.position}, ": " + result.name});
 }
 
@@ -88,8 +204,14 @@ void makeInsertable(const ClientConfiguration& config, lsp::InlayHint& hint, Lua
     if (!config.inlayHints.makeInsertable)
         return;
 
+    // A vararg is annotated with the type of its values (`...: T`) or with a generic pack (`...: T...`), not with a list of types
+    if (removeLeadingEllipsis && !Luau::get<Luau::VariadicTypePack>(Luau::follow(ty)) && !Luau::get<Luau::GenericTypePack>(Luau::follow(ty)))
+        return;
+
     auto result = types::toStringReturnTypeDetailed(ty);
     if (result.invalid || result.truncated || result.error || result.cycle)
+        return;
+    if (UnnameableTypeFinder{}.find(ty))
         return;
     auto name = result.name;
     if (removeLeadingEllipsis)

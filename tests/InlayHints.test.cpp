@@ -843,12 +843,14 @@ TEST_CASE_FIXTURE(Fixture, "skip_self_as_first_parameter_on_method_definitions")
     CHECK_EQ(result[0].paddingLeft, false);
     CHECK_EQ(result[0].paddingRight, false);
 
-    REQUIRE(result[0].textEdits.size() == 1);
     if (FFlag::LuauSolverV2)
+    {
+        REQUIRE(result[0].textEdits.size() == 1);
         CHECK_EQ(result[0].textEdits[0].newText, ": unknown");
+        CHECK_EQ(result[0].textEdits[0].range, lsp::Range{{2, 30}, {2, 30}});
+    }
     else
-        CHECK_EQ(result[0].textEdits[0].newText, ": a");
-    CHECK_EQ(result[0].textEdits[0].range, lsp::Range{{2, 30}, {2, 30}});
+        CHECK_EQ(result[0].textEdits.size(), 0);
 }
 
 TEST_CASE_FIXTURE(Fixture, "skip_self_as_first_parameter_on_method_definitions_2")
@@ -1033,6 +1035,167 @@ TEST_CASE_FIXTURE(Fixture, "inlay_hint_generics_and_extern_type")
     REQUIRE(result[0].label[3].tooltip);
     CHECK_EQ(result[0].label[3].tooltip->value, "Example Class Documentation");
     CHECK_EQ(result[0].label[4].value, ">");
+}
+
+TEST_CASE_FIXTURE(Fixture, "inlay_hint_for_inferred_generic_parameter_and_return_type_is_not_insertable")
+{
+    client->globalConfig.inlayHints.parameterTypes = true;
+    client->globalConfig.inlayHints.functionReturnTypes = true;
+    auto source = R"(
+        local function id(x)
+            return x
+        end
+    )";
+
+    auto result = processInlayHint(this, source);
+    REQUIRE_EQ(result.size(), 2);
+
+    // The hints read `: a`, but the generic was inferred: there is no `a` in scope that an annotation could refer to
+    CHECK_EQ(result[0].position, lsp::Position{1, 28});
+    CHECK_EQ(result[0].textEdits.size(), 0);
+    CHECK_EQ(result[1].position, lsp::Position{1, 27});
+    CHECK_EQ(result[1].textEdits.size(), 0);
+}
+
+TEST_CASE_FIXTURE(Fixture, "inlay_hint_for_inferred_generic_pack_is_not_insertable")
+{
+    client->globalConfig.inlayHints.parameterTypes = true;
+    client->globalConfig.inlayHints.functionReturnTypes = true;
+    auto source = R"(
+        local function call(f)
+            return f()
+        end
+    )";
+
+    auto result = processInlayHint(this, source);
+    REQUIRE_EQ(result.size(), 2);
+
+    // The hints read `: a...` and `: () -> (a...)`
+    CHECK_EQ(result[0].position, lsp::Position{1, 30});
+    CHECK_EQ(result[0].textEdits.size(), 0);
+    CHECK_EQ(result[1].position, lsp::Position{1, 29});
+    CHECK_EQ(result[1].textEdits.size(), 0);
+}
+
+TEST_CASE_FIXTURE(Fixture, "inlay_hint_for_variable_of_inferred_generic_type_is_not_insertable")
+{
+    client->globalConfig.inlayHints.variableTypes = true;
+    auto source = R"(
+        local function id(x)
+            local y = x
+            return y
+        end
+    )";
+
+    auto result = processInlayHint(this, source);
+    REQUIRE_EQ(result.size(), 1);
+
+    CHECK_EQ(result[0].position, lsp::Position{2, 19});
+    CHECK_EQ(result[0].textEdits.size(), 0);
+}
+
+TEST_CASE_FIXTURE(Fixture, "inlay_hint_for_declared_generic_type_is_insertable")
+{
+    client->globalConfig.inlayHints.variableTypes = true;
+    auto source = R"(
+        local function id<T>(x: T)
+            local y = x
+            return y
+        end
+    )";
+
+    auto result = processInlayHint(this, source);
+    REQUIRE_EQ(result.size(), 1);
+
+    CHECK_EQ(labelToString(result[0].label), ": T");
+    REQUIRE_EQ(result[0].textEdits.size(), 1);
+    CHECK_EQ(result[0].textEdits[0].newText, ": T");
+}
+
+TEST_CASE_FIXTURE(Fixture, "inlay_hint_for_generic_function_type_is_insertable")
+{
+    client->globalConfig.inlayHints.variableTypes = true;
+    auto source = R"(
+        type Identity = <T>(T) -> T
+        local id: Identity
+        local copy = id
+    )";
+
+    auto result = processInlayHint(this, source);
+    REQUIRE_EQ(result.size(), 1);
+
+    // The generic is declared by the function type itself
+    CHECK_EQ(labelToString(result[0].label), ": <T>(T) -> T");
+    REQUIRE_EQ(result[0].textEdits.size(), 1);
+    CHECK_EQ(result[0].textEdits[0].newText, ": <T>(T) -> T");
+}
+
+TEST_CASE_FIXTURE(Fixture, "inlay_hint_for_refined_type_with_negation_is_not_insertable")
+{
+    ENABLE_NEW_SOLVER();
+
+    client->globalConfig.inlayHints.variableTypes = true;
+    auto source = R"(
+        local function f(name: string)
+            if name ~= "init" then
+                local other = name
+            end
+        end
+    )";
+
+    auto result = processInlayHint(this, source);
+    REQUIRE_EQ(result.size(), 1);
+
+    // `~"init"` cannot be written in a type annotation
+    CHECK_EQ(labelToString(result[0].label), ": string & ~\"init\"");
+    CHECK_EQ(result[0].textEdits.size(), 0);
+}
+
+TEST_CASE_FIXTURE(Fixture, "inlay_hint_for_type_function_over_a_negation_is_not_insertable")
+{
+    ENABLE_NEW_SOLVER();
+
+    client->globalConfig.inlayHints.variableTypes = true;
+    auto source = R"(
+        local function f<K, V>(data: { [K]: V })
+            for key, value in data do
+            end
+        end
+    )";
+
+    auto result = processInlayHint(this, source);
+    REQUIRE_EQ(result.size(), 2);
+
+    // The hints read `: intersect<K, ~nil>` and `: intersect<V, ~nil>`
+    CHECK_EQ(result[0].textEdits.size(), 0);
+    CHECK_EQ(result[1].textEdits.size(), 0);
+}
+
+TEST_CASE_FIXTURE(Fixture, "inlay_hint_for_vararg_with_fixed_and_variadic_types_is_not_insertable")
+{
+    client->globalConfig.inlayHints.parameterTypes = true;
+    auto source = R"(
+        local function id(_: (string, ...number) -> ()) end
+
+        id(function(...)
+        end)
+    )";
+
+    auto result = processInlayHint(this, source);
+    REQUIRE_EQ(result.size(), 1);
+
+    if (FFlag::LuauSolverV2)
+    {
+        CHECK_EQ(labelToString(result[0].label), ": any");
+        REQUIRE_EQ(result[0].textEdits.size(), 1);
+        CHECK_EQ(result[0].textEdits[0].newText, ": any");
+    }
+    else
+    {
+        // `...: (string, ...number)` is not valid syntax
+        CHECK_EQ(labelToString(result[0].label), ": (string, ...number)");
+        CHECK_EQ(result[0].textEdits.size(), 0);
+    }
 }
 
 TEST_CASE_FIXTURE(Fixture, "show_correct_inlay_hint_for_function_returning_empty_pack")
