@@ -368,6 +368,138 @@ TEST_CASE_FIXTURE(Fixture, "disallow_renaming_of_global_from_type_definition")
     REQUIRE_THROWS_WITH_AS(workspace.rename(params, nullptr), "Cannot rename a global variable", JsonRpcException);
 }
 
+TEST_CASE_FIXTURE(Fixture, "disallow_renaming_of_builtin_type")
+{
+    auto source = R"(
+        local x: boolean = true
+        local y: boolean = false
+    )";
+
+    auto uri = newDocument("foo.luau", source);
+
+    lsp::RenameParams params;
+    params.textDocument = lsp::TextDocumentIdentifier{uri};
+    params.position = lsp::Position{1, 20}; // 'boolean'
+    params.newName = "bool";
+
+    REQUIRE_THROWS_WITH_AS(workspace.rename(params, nullptr), "Cannot rename a type that is not defined in this file", JsonRpcException);
+}
+
+TEST_CASE_FIXTURE(Fixture, "disallow_renaming_of_type_from_type_definition")
+{
+    auto source = R"(
+        local x: Instance? = nil
+    )";
+
+    auto uri = newDocument("foo.luau", source);
+
+    lsp::RenameParams params;
+    params.textDocument = lsp::TextDocumentIdentifier{uri};
+    params.position = lsp::Position{1, 20}; // 'Instance'
+    params.newName = "Object";
+
+    REQUIRE_THROWS_WITH_AS(workspace.rename(params, nullptr), "Cannot rename a type that is not defined in this file", JsonRpcException);
+}
+
+TEST_CASE_FIXTURE(Fixture, "disallow_renaming_of_implicit_self")
+{
+    auto source = R"(
+        local Class = {}
+
+        function Class:method()
+            return self
+        end
+    )";
+
+    auto uri = newDocument("foo.luau", source);
+
+    lsp::RenameParams params;
+    params.textDocument = lsp::TextDocumentIdentifier{uri};
+    params.position = lsp::Position{4, 21}; // 'self'
+    params.newName = "this";
+
+    REQUIRE_THROWS_WITH_AS(workspace.rename(params, nullptr), "Cannot rename the implicit self of a method", JsonRpcException);
+}
+
+TEST_CASE_FIXTURE(Fixture, "rename_explicit_self_parameter")
+{
+    auto source = R"(
+        local Class = {}
+
+        function Class.method(self)
+            return self
+        end
+    )";
+
+    auto uri = newDocument("foo.luau", source);
+
+    lsp::RenameParams params;
+    params.textDocument = lsp::TextDocumentIdentifier{uri};
+    params.position = lsp::Position{4, 21}; // 'self'
+    params.newName = "this";
+
+    auto result = workspace.rename(params, nullptr);
+    REQUIRE(result);
+    REQUIRE(result->changes.size() == 1);
+
+    auto documentEdits = result->changes.begin()->second;
+    CHECK_EQ(applyEdit(source, documentEdits), R"(
+        local Class = {}
+
+        function Class.method(this)
+            return this
+        end
+    )");
+}
+
+TEST_CASE_FIXTURE(Fixture, "rename_type_alias_from_usage")
+{
+    auto source = R"(
+        type Point = { x: number, y: number }
+
+        local origin: Point = { x = 0, y = 0 }
+    )";
+
+    auto uri = newDocument("foo.luau", source);
+
+    lsp::RenameParams params;
+    params.textDocument = lsp::TextDocumentIdentifier{uri};
+    params.position = lsp::Position{3, 24}; // 'Point'
+    params.newName = "Vec";
+
+    auto result = workspace.rename(params, nullptr);
+    REQUIRE(result);
+    REQUIRE(result->changes.size() == 1);
+
+    auto documentEdits = result->changes.begin()->second;
+    CHECK_EQ(applyEdit(source, documentEdits), R"(
+        type Vec = { x: number, y: number }
+
+        local origin: Vec = { x = 0, y = 0 }
+    )");
+}
+
+TEST_CASE_FIXTURE(Fixture, "rename_generic_type_parameter_of_enclosing_function_from_nested_function")
+{
+    auto source = R"(
+        local function outer<T>(x: T)
+            local function inner(y: T)
+            end
+        end
+    )";
+
+    auto uri = newDocument("foo.luau", source);
+
+    lsp::RenameParams params;
+    params.textDocument = lsp::TextDocumentIdentifier{uri};
+    params.position = lsp::Position{2, 36}; // 'T' in the nested function
+    params.newName = "Value";
+
+    auto result = workspace.rename(params, nullptr);
+    REQUIRE(result);
+    REQUIRE(result->changes.size() == 1);
+}
+
 TEST_CASE_FIXTURE(Fixture, "dont_rename_cross_module_usages_of_a_returned_local_function")
 {
     auto uri = newDocument("useFunction.luau", R"(
