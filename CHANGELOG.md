@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Rename now refuses a type that is not defined in the file (a builtin type such as `number`, or a type from a definitions file) and the implicit `self` of a method, instead of rewriting their uses into names that do not exist
+
 ## [1.70.1] - 2026-09-27
 
 ### Added

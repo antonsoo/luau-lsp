@@ -18,6 +18,63 @@ static bool isGlobalBinding(const Luau::Binding& binding)
     return binding.location.begin == Luau::Position{0, 0} && binding.location.end == Luau::Position{0, 0};
 }
 
+// Whether the local is the `self` that `function T:method()` declares implicitly, which has no name in the source to rename
+static bool isImplicitSelf(const Luau::SourceModule& sourceModule, const Luau::Position& position, const Luau::AstLocal* local)
+{
+    for (const auto node : Luau::findAstAncestryOfPosition(sourceModule, position))
+        if (auto func = node->as<Luau::AstExprFunction>(); func && func->self == local)
+            return true;
+
+    return false;
+}
+
+template<typename Generics, typename GenericPacks>
+static bool declaresGeneric(const Generics& generics, const GenericPacks& genericPacks, const Luau::AstName& name)
+{
+    for (const auto& generic : generics)
+        if (generic->name == name)
+            return true;
+    for (const auto& genericPack : genericPacks)
+        if (genericPack->name == name)
+            return true;
+
+    return false;
+}
+
+// Whether the position is on a type name that this file does not declare: a builtin type, or one from a definitions file
+static bool isReferenceToUndeclaredType(const Luau::SourceModule& sourceModule, const Luau::Module& module, const Luau::Position& position)
+{
+    auto node = findNodeOrTypeAtPositionClosed(sourceModule, position);
+    auto reference = node ? node->as<Luau::AstTypeReference>() : nullptr;
+    if (!reference || reference->prefix)
+        return false;
+
+    for (const auto ancestor : Luau::findAstAncestryOfPosition(sourceModule, position, /* includeTypes= */ true))
+    {
+        if (auto typeAlias = ancestor->as<Luau::AstStatTypeAlias>())
+        {
+            if (declaresGeneric(typeAlias->generics, typeAlias->genericPacks, reference->name))
+                return false;
+        }
+        else if (auto typeFunction = ancestor->as<Luau::AstTypeFunction>())
+        {
+            if (declaresGeneric(typeFunction->generics, typeFunction->genericPacks, reference->name))
+                return false;
+        }
+        else if (auto func = ancestor->as<Luau::AstExprFunction>())
+        {
+            if (declaresGeneric(func->generics, func->genericPacks, reference->name))
+                return false;
+        }
+    }
+
+    for (auto scope = Luau::findScopeAtPosition(module, position); scope; scope = scope->parent)
+        if (scope->typeAliasNameLocations.find(reference->name.value) != scope->typeAliasNameLocations.end())
+            return false;
+
+    return true;
+}
+
 std::vector<lsp::Location> getReferencesForRenaming(
     WorkspaceFolder* workspaceFolder, const lsp::RenameParams& params, const LSPCancellationToken& cancellationToken)
 {
@@ -53,6 +110,9 @@ std::vector<lsp::Location> getReferencesForRenaming(
 
     if (symbol)
     {
+        if (symbol.local && isImplicitSelf(*sourceModule, position, symbol.local))
+            throw JsonRpcException(lsp::ErrorCode::RequestFailed, "Cannot rename the implicit self of a method");
+
         std::vector<lsp::Location> result;
 
         auto references = findSymbolReferences(*sourceModule, symbol);
@@ -67,6 +127,10 @@ std::vector<lsp::Location> getReferencesForRenaming(
     }
     else
     {
+        if (auto module = workspaceFolder->getModule(moduleName, /* forAutocomplete: */ true);
+            module && isReferenceToUndeclaredType(*sourceModule, *module, position))
+            throw JsonRpcException(lsp::ErrorCode::RequestFailed, "Cannot rename a type that is not defined in this file");
+
         // Use findAllReferences to determine locations
         lsp::ReferenceParams referenceParams{};
         referenceParams.textDocument = params.textDocument;
