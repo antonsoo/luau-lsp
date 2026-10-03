@@ -1242,4 +1242,91 @@ TEST_CASE_FIXTURE(Fixture, "inlay_hint_does_not_crash_on_truncated_intersection_
     REQUIRE_GE(result.size(), 1);
 }
 
+TEST_CASE_FIXTURE(Fixture, "inlay_hint_for_bare_function_type_is_not_insertable")
+{
+    ENABLE_NEW_SOLVER();
+    client->globalConfig.inlayHints.variableTypes = true;
+    auto result = processInlayHint(this, R"(
+        local function inspect(value: unknown)
+            if type(value) == "function" then
+                local copy = value
+            end
+        end
+    )");
+    REQUIRE_EQ(result.size(), 1);
+    CHECK_EQ(labelToString(result[0].label), ": function");
+    CHECK(result[0].textEdits.empty());
+}
+
+TEST_CASE_FIXTURE(Fixture, "inlay_hint_for_return_pack_containing_bare_function_is_not_insertable")
+{
+    ENABLE_NEW_SOLVER();
+    client->globalConfig.inlayHints.functionReturnTypes = true;
+    auto result = processInlayHint(this, R"(
+        local function inspect(value: unknown)
+            if type(value) == "function" then
+                return value, true
+            end
+            error("not a function")
+        end
+    )");
+    REQUIRE_EQ(result.size(), 1);
+    CHECK(labelToString(result[0].label).find("function") != std::string::npos);
+    CHECK(result[0].textEdits.empty());
+}
+
+TEST_CASE_FIXTURE(Fixture, "inlay_hint_with_unquoted_invalid_property_name_is_not_insertable")
+{
+    client->globalConfig.inlayHints.variableTypes = true;
+    std::string key;
+    SUBCASE("keyword")
+    {
+        key = "function";
+    }
+    SUBCASE("numeric identifier")
+    {
+        key = "123abc";
+    }
+    SUBCASE("empty identifier")
+    {
+        key = "";
+    }
+    auto result = processInlayHint(this, "\nlocal function create() return {[\"" + key + "\"] = true} end\nlocal value = create()\n");
+    REQUIRE_EQ(result.size(), 1);
+    CHECK(!labelToString(result[0].label).empty());
+    CHECK(result[0].textEdits.empty());
+}
+
+TEST_CASE_FIXTURE(Fixture, "inlay_hint_with_valid_quoted_or_contextual_property_name_is_insertable")
+{
+    client->globalConfig.inlayHints.variableTypes = true;
+    std::string key;
+    SUBCASE("quoted punctuation")
+    {
+        key = "123-abc";
+    }
+    SUBCASE("contextual keyword")
+    {
+        key = "type";
+    }
+    auto result = processInlayHint(this, "\nlocal function create() return {[\"" + key + "\"] = true} end\nlocal value = create()\n");
+    REQUIRE_EQ(result.size(), 1);
+    REQUIRE_EQ(result[0].textEdits.size(), 1);
+    CHECK_EQ(result[0].textEdits[0].newText, labelToString(result[0].label));
+}
+
+TEST_CASE_FIXTURE(Fixture, "inlay_hint_for_named_table_with_keyword_field_is_insertable")
+{
+    client->globalConfig.inlayHints.variableTypes = true;
+    auto result = processInlayHint(this, R"(
+        type Options = { ["function"]: boolean }
+        local function inspect(value: Options)
+            local copy = value
+        end
+    )");
+    REQUIRE_EQ(result.size(), 1);
+    REQUIRE_EQ(result[0].textEdits.size(), 1);
+    CHECK_EQ(result[0].textEdits[0].newText, ": Options");
+}
+
 TEST_SUITE_END();

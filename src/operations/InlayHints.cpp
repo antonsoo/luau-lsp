@@ -5,6 +5,8 @@
 
 #include "Luau/Ast.h"
 #include "Luau/AstQuery.h"
+#include "Luau/Lexer.h"
+#include "Luau/StringUtils.h"
 #include "Luau/ToString.h"
 #include "Luau/PrettyPrinter.h"
 #include "LSP/LuauExt.hpp"
@@ -93,6 +95,9 @@ struct UnnameableTypeFinder
         // Negations appear in refined types (`string & ~"init"`), and have no syntax
         if (Luau::get<Luau::FreeType>(ty) || Luau::get<Luau::NegationType>(ty))
             return true;
+        // The primitive function type is printed as the keyword `function`, not a function signature
+        if (auto primitive = Luau::get<Luau::PrimitiveType>(ty))
+            return primitive->type == Luau::PrimitiveType::Function;
 
         if (std::find(visiting.begin(), visiting.end(), ty) != visiting.end())
             return false;
@@ -152,9 +157,14 @@ private:
                 return false;
             }
 
-            for (const auto& [_, prop] : ttv->props)
+            for (const auto& [name, prop] : ttv->props)
+            {
+                // The printer leaves identifier-like names unquoted, including keywords and names that start with a digit
+                if (Luau::isIdentifier(name) && (name.empty() || (name.front() >= '0' && name.front() <= '9') || Luau::Lexer::isReserved(name)))
+                    return true;
                 if ((prop.readTy && find(*prop.readTy)) || (prop.writeTy && find(*prop.writeTy)))
                     return true;
+            }
             return ttv->indexer && (find(ttv->indexer->indexType) || find(ttv->indexer->indexResultType));
         }
         if (auto mtv = Luau::get<Luau::MetatableType>(ty))
