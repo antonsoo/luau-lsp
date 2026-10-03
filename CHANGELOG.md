@@ -10,6 +10,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - Inlay hints no longer offer to insert a type that would not be valid where it is inserted: a generic that was inferred rather than declared (`: a`, `: a...`), a refined type containing a negation (`: string & ~"init"`), or a list of types on a vararg (`...: (string, ...number)`). The hint is still shown
 
+### Changed
+
+- Sync to upstream Luau 0.741
+
 ## [1.70.1] - 2026-09-27
 
 ### Added
