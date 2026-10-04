@@ -14,6 +14,9 @@ private:
     size_t _version;
     std::string _content;
     mutable std::optional<std::vector<size_t>> _lineOffsets = std::nullopt;
+    mutable std::optional<std::vector<size_t>> _luauLineOffsets = std::nullopt;
+
+    const std::vector<size_t>& getLuauLineOffsets() const;
 
 public:
     TextDocument(lsp::DocumentUri uri, std::string languageId, size_t version, std::string content)

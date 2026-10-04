@@ -87,6 +87,89 @@ TEST_CASE("New line characters")
     CHECK_EQ(newDocument(str).lineCount(), 3);
 }
 
+TEST_CASE("Luau positions use LF lines while protocol positions recognize CR")
+{
+    auto originalEncoding = positionEncoding();
+    for (auto encoding : {lsp::PositionEncodingKind::UTF8, lsp::PositionEncodingKind::UTF16, lsp::PositionEncodingKind::UTF32})
+    {
+        positionEncoding() = encoding;
+        auto document = newDocument("one\rα🌍\r\nthree\rfour\nlast");
+        size_t alphaUnits = encoding == lsp::PositionEncodingKind::UTF8 ? 2 : 1;
+        size_t unicodeUnits = encoding == lsp::PositionEncodingKind::UTF8 ? 6 : encoding == lsp::PositionEncodingKind::UTF16 ? 3 : 2;
+
+        CHECK_EQ(document.lineCount(), 5);
+        CHECK_EQ(document.convertPosition(lsp::Position{1, 0}), Luau::Position{0, 4});
+        CHECK_EQ(document.convertPosition(lsp::Position{1, alphaUnits}), Luau::Position{0, 6});
+        CHECK_EQ(document.convertPosition(lsp::Position{1, unicodeUnits}), Luau::Position{0, 10});
+        CHECK_EQ(document.convertPosition(lsp::Position{2, 0}), Luau::Position{1, 0});
+        CHECK_EQ(document.convertPosition(lsp::Position{3, 0}), Luau::Position{1, 6});
+        CHECK_EQ(document.convertPosition(lsp::Position{4, 4}), Luau::Position{2, 4});
+        CHECK_EQ(document.convertPosition(lsp::Position{20, 0}), Luau::Position{2, 4});
+
+        CHECK_EQ(document.convertPosition(Luau::Position{0, 4}), lsp::Position{1, 0});
+        CHECK_EQ(document.convertPosition(Luau::Position{0, 6}), lsp::Position{1, alphaUnits});
+        CHECK_EQ(document.convertPosition(Luau::Position{0, 10}), lsp::Position{1, unicodeUnits});
+        CHECK_EQ(document.convertPosition(Luau::Position{1, 0}), lsp::Position{2, 0});
+        CHECK_EQ(document.convertPosition(Luau::Position{1, 6}), lsp::Position{3, 0});
+        CHECK_EQ(document.convertPosition(Luau::Position{2, 4}), lsp::Position{4, 4});
+
+        CHECK_EQ(document.offsetAt(lsp::Position{1, alphaUnits}), 6);
+        CHECK_EQ(document.offsetAt(lsp::Position{3, 0}), 18);
+        CHECK_EQ(document.getText(lsp::Range{{1, 0}, {3, 4}}), "α🌍\r\nthree\rfour");
+        CHECK_EQ(document.convertRange(lsp::Range{{1, 0}, {3, 4}}), Luau::Location{{0, 4}, {1, 10}});
+        CHECK_EQ(document.convertLocation(Luau::Location{{0, 4}, {1, 10}}), lsp::Range{{1, 0}, {3, 4}});
+    }
+    positionEncoding() = originalEncoding;
+}
+
+TEST_CASE("Luau line offsets are invalidated between incremental and full updates")
+{
+    auto document = newDocument("a\rb\nc");
+    CHECK_EQ(document.convertPosition(lsp::Position{1, 0}), Luau::Position{0, 2});
+    CHECK_EQ(document.convertPosition(lsp::Position{2, 0}), Luau::Position{1, 0});
+
+    document.update({lsp::TextDocumentContentChangeEvent{lsp::Range{{0, 1}, {1, 0}}, ""}}, 1);
+    CHECK_EQ(document.getText(), "ab\nc");
+    CHECK_EQ(document.convertPosition(Luau::Position{1, 0}), lsp::Position{1, 0});
+    CHECK_EQ(document.offsetAt(lsp::Position{1, 0}), 3);
+
+    document.update({lsp::TextDocumentContentChangeEvent{lsp::Range{{0, 1}, {0, 1}}, "\rX\r\n"},
+                        lsp::TextDocumentContentChangeEvent{lsp::Range{{2, 1}, {2, 1}}, "\rY"}},
+        2);
+    CHECK_EQ(document.getText(), "a\rX\r\nb\rY\nc");
+    CHECK_EQ(document.convertPosition(lsp::Position{3, 0}), Luau::Position{1, 2});
+    CHECK_EQ(document.convertPosition(lsp::Position{4, 0}), Luau::Position{2, 0});
+    CHECK_EQ(document.convertPosition(Luau::Position{1, 2}), lsp::Position{3, 0});
+
+    document.update({lsp::TextDocumentContentChangeEvent{std::nullopt, "\r\rfinal\n"}}, 3);
+    CHECK_EQ(document.convertPosition(lsp::Position{2, 0}), Luau::Position{0, 2});
+    CHECK_EQ(document.convertPosition(Luau::Position{0, 2}), lsp::Position{2, 0});
+    CHECK_EQ(document.convertPosition(Luau::Position{1, 0}), lsp::Position{3, 0});
+}
+
+TEST_CASE("CRLF pairs formed across incremental edit boundaries remain one line ending")
+{
+    for (auto source : {"a\nb", "a\rb", "a\rX\nb"})
+    {
+        auto document = newDocument(source);
+        // Populate both caches before changing the line ending.
+        document.convertPosition(lsp::Position{1, 0});
+        if (std::string(source) == "a\nb")
+            document.update({{lsp::Range{{0, 1}, {0, 1}}, "\r"}}, 1);
+        else if (std::string(source) == "a\rb")
+            document.update({{lsp::Range{{1, 0}, {1, 0}}, "\n"}}, 1);
+        else
+            document.update({{lsp::Range{{1, 0}, {1, 1}}, ""}}, 1);
+
+        CHECK_EQ(document.getText(), "a\r\nb");
+        CHECK_EQ(document.lineCount(), 2);
+        CHECK_EQ(document.offsetAt(lsp::Position{1, 0}), 3);
+        CHECK_EQ(document.positionAt(3), lsp::Position{1, 0});
+        CHECK_EQ(document.convertPosition(lsp::Position{1, 0}), Luau::Position{1, 0});
+        CHECK_EQ(document.convertPosition(Luau::Position{1, 0}), lsp::Position{1, 0});
+    }
+}
+
 TEST_CASE("getText(Range)")
 {
     std::string str = "12345\n12345\n12345";

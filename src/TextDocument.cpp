@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <iostream>
 #include <climits>
 #include "Luau/Common.h"
@@ -251,47 +252,44 @@ lsp::Position TextDocument::positionAt(size_t offset) const
 size_t TextDocument::offsetAt(const lsp::Position& position) const
 {
     auto utf8Position = convertPosition(position);
-    auto lineOffsets = getLineOffsets();
+    const auto& lineOffsets = getLuauLineOffsets();
     auto lineOffset = lineOffsets[utf8Position.line];
     return lineOffset + utf8Position.column;
 }
 
-// We treat all lsp:Positions as UTF-16 encoded. We must convert between the two when necessary
 Luau::Position TextDocument::convertPosition(const lsp::Position& position) const
 {
     LUAU_ASSERT(position.line <= UINT_MAX);
     LUAU_ASSERT(position.character <= UINT_MAX);
 
-    auto lineOffsets = getLineOffsets();
-    if (position.line >= lineCount())
+    const auto& lineOffsets = getLineOffsets();
+    size_t offset = _content.size();
+    if (position.line < lineOffsets.size())
     {
-        return Luau::Position{static_cast<unsigned int>(lineOffsets.size() - 1), static_cast<unsigned int>(_content.size() - lineOffsets.back())};
+        auto lineOffset = lineOffsets[position.line];
+        auto nextLineOffset = position.line + 1 < lineOffsets.size() ? lineOffsets[position.line + 1] : _content.size();
+
+        bool valid = true;
+        std::string line = _content.substr(lineOffset, nextLineOffset - lineOffset);
+        size_t byteInLine = measureUnits(line, static_cast<int>(position.character), positionEncoding(), valid);
+
+        if (!valid)
+            std::cerr << "UTF-16 offset " << position.character << " is invalid for line " << position.line << "\n";
+
+        offset = lineOffset + byteInLine;
     }
-    else if (position.line < 0)
-    {
-        return Luau::Position{0, 0};
-    }
-    auto lineOffset = lineOffsets[position.line];
-    auto nextLineOffset = position.line + 1 < lineOffsets.size() ? lineOffsets[position.line + 1] : _content.size();
 
-    // position.character may be in UTF-16, so we need to convert as necessary
-    bool valid = true;
-    std::string line = _content.substr(lineOffset, nextLineOffset - lineOffset);
-    size_t byteInLine = measureUnits(line, static_cast<int>(position.character), positionEncoding(), valid);
-
-    if (!valid)
-        std::cerr << "UTF-16 offset " << position.character << " is invalid for line " << position.line << "\n";
-
-    return Luau::Position{static_cast<unsigned int>(position.line), static_cast<unsigned int>(byteInLine)};
+    const auto& luauLineOffsets = getLuauLineOffsets();
+    auto line = std::upper_bound(luauLineOffsets.begin(), luauLineOffsets.end(), offset) - luauLineOffsets.begin() - 1;
+    return Luau::Position{static_cast<unsigned int>(line), static_cast<unsigned int>(offset - luauLineOffsets[line])};
 }
 
 lsp::Position TextDocument::convertPosition(const Luau::Position& position) const
 {
-    auto lineOffsets = getLineOffsets();
+    const auto& lineOffsets = getLuauLineOffsets();
     auto line = position.line;
     LUAU_ASSERT(line < lineOffsets.size());
-    std::string currentContent = _content.substr(line < lineOffsets.size() ? lineOffsets[line] : lineOffsets.back(), position.column);
-    return lsp::Position{line, lspLength(currentContent)};
+    return positionAt((line < lineOffsets.size() ? lineOffsets[line] : lineOffsets.back()) + position.column);
 }
 
 Luau::Location TextDocument::convertRange(const lsp::Range& range) const
@@ -314,7 +312,17 @@ void TextDocument::update(const std::vector<lsp::TextDocumentContentChangeEvent>
             auto range = getWellformedRange(*change.range);
             size_t startOffset = offsetAt(range.start);
             size_t endOffset = offsetAt(range.end); // End position is EXCLUSIVE
+            bool touchesCrLf = (startOffset > 0 && _content[startOffset - 1] == '\r') ||
+                               (endOffset < _content.size() && _content[endOffset] == '\n' && !change.text.empty() && change.text.back() == '\r');
             _content = _content.substr(0, startOffset) + change.text + _content.substr(endOffset, _content.size() - endOffset);
+
+            // CR and LF can form or split a line ending across an edit boundary.
+            if (touchesCrLf)
+            {
+                _lineOffsets = std::nullopt;
+                _luauLineOffsets = std::nullopt;
+                continue;
+            }
 
             // Update offset
             size_t startLine = std::max(range.start.line, (size_t)0);
@@ -354,7 +362,10 @@ void TextDocument::update(const std::vector<lsp::TextDocumentContentChangeEvent>
         {
             _content = change.text;
             _lineOffsets = std::nullopt;
+            _luauLineOffsets = std::nullopt;
         }
+        if (!_luauLineOffsets || !_luauLineOffsets->empty() || change.text.find('\r') != std::string::npos)
+            _luauLineOffsets = std::nullopt;
     }
 }
 
@@ -370,4 +381,28 @@ const std::vector<size_t>& TextDocument::getLineOffsets() const
         _lineOffsets = computeLineOffsets(_content, true);
     }
     return *_lineOffsets;
+}
+
+const std::vector<size_t>& TextDocument::getLuauLineOffsets() const
+{
+    if (!_luauLineOffsets)
+    {
+        // Luau advances its line counter only at LF; LSP also recognizes standalone CR.
+        _luauLineOffsets = std::vector<size_t>{};
+        for (size_t offset = _content.find('\r'); offset != std::string::npos; offset = _content.find('\r', offset + 1))
+        {
+            if (offset + 1 == _content.size() || _content[offset + 1] != '\n')
+            {
+                _luauLineOffsets = std::vector<size_t>{0};
+                for (size_t index = 0; index < _content.size(); ++index)
+                {
+                    if (_content[index] == '\n')
+                        _luauLineOffsets->push_back(index + 1);
+                }
+                break;
+            }
+        }
+    }
+    // An empty cache means the protocol and compiler have the same line boundaries.
+    return _luauLineOffsets->empty() ? getLineOffsets() : *_luauLineOffsets;
 }
