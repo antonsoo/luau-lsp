@@ -8,7 +8,9 @@
 #include "Platform/AutoImports.hpp"
 #include "Platform/LSPPlatform.hpp"
 #include "Luau/Ast.h"
+#include "Luau/AstQuery.h"
 #include "Luau/Error.h"
+#include "Luau/Lexer.h"
 
 #include <unordered_set>
 
@@ -65,6 +67,66 @@ std::optional<lsp::Diagnostic> findMatchingDiagnostic(const std::vector<lsp::Dia
     {
         if (diag.range == range)
             return diag;
+    }
+    return std::nullopt;
+}
+
+std::optional<lsp::TextEdit> getPropertyCorrectionEdit(
+    const Luau::SourceModule& sourceModule, const TextDocument& textDocument, const Luau::Location& location, const std::string& candidate)
+{
+    for (auto node : Luau::findAstAncestryOfPosition(sourceModule, location.begin))
+    {
+        if (node->location != location)
+            continue;
+
+        // The old solver reports missing methods on the whole call, including its arguments.
+        if (auto call = node->as<Luau::AstExprCall>(); call && call->self)
+            node = call->func;
+
+        if (auto index = node->as<Luau::AstExprIndexName>())
+        {
+            if (Luau::isIdentifier(candidate) && !Luau::Lexer::isReserved(candidate))
+                return lsp::TextEdit{textDocument.convertLocation(index->indexLocation), candidate};
+            if (index->op == '.')
+                return lsp::TextEdit{
+                    textDocument.convertLocation({index->opPosition, index->indexLocation.end}), "[\"" + Luau::escape(candidate) + "\"]"};
+            return std::nullopt;
+        }
+        else if (auto index = node->as<Luau::AstExprIndexExpr>())
+        {
+            auto key = index->index->as<Luau::AstExprConstantString>();
+            if (!key)
+                return std::nullopt;
+
+            auto range = textDocument.convertLocation(key->location);
+            const auto source = textDocument.getText(range);
+            size_t delimiterLength = 1;
+            if (key->quoteStyle == Luau::AstExprConstantString::QuoteStyle::QuotedRaw)
+            {
+                auto openingEnd = source.find('[', 1);
+                if (openingEnd == std::string::npos)
+                    return std::nullopt;
+                delimiterLength = openingEnd + 1;
+                auto closingDelimiter = source.substr(0, delimiterLength);
+                closingDelimiter.front() = closingDelimiter.back() = ']';
+                if (source.size() < 2 * delimiterLength || source.substr(source.size() - delimiterLength) != closingDelimiter)
+                    return std::nullopt;
+                if (source.size() > delimiterLength &&
+                    (source[delimiterLength] == '\n' ||
+                        (source[delimiterLength] == '\r' && source.size() > delimiterLength + 1 && source[delimiterLength + 1] == '\n')))
+                    range.start = {range.start.line + 1, 0};
+                else
+                    range.start.character += delimiterLength;
+            }
+            else
+                range.start.character += delimiterLength;
+
+            range.end.character -= delimiterLength;
+            auto replacement = key->quoteStyle == Luau::AstExprConstantString::QuoteStyle::QuotedRaw
+                                   ? candidate
+                                   : Luau::escape(candidate, !source.empty() && source.front() == '`');
+            return lsp::TextEdit{range, replacement};
+        }
     }
     return std::nullopt;
 }
@@ -357,6 +419,10 @@ lsp::CodeActionResult WorkspaceFolder::codeAction(const lsp::CodeActionParams& p
 
                 for (const auto& candidate : misspelledProp->candidates)
                 {
+                    auto edit = getPropertyCorrectionEdit(*sourceModule, *textDocument, error.location, candidate);
+                    if (!edit)
+                        continue;
+
                     lsp::CodeAction action;
                     action.title = "Change '" + misspelledProp->key + "' to '" + candidate + "'";
                     action.kind = lsp::CodeActionKind::QuickFix;
@@ -365,10 +431,8 @@ lsp::CodeActionResult WorkspaceFolder::codeAction(const lsp::CodeActionParams& p
                     if (diagnostic)
                         action.diagnostics.push_back(*diagnostic);
 
-                    lsp::TextEdit edit{errorRange, candidate};
-
                     lsp::WorkspaceEdit workspaceEdit;
-                    workspaceEdit.changes.emplace(params.textDocument.uri, std::vector{edit});
+                    workspaceEdit.changes.emplace(params.textDocument.uri, std::vector{*edit});
                     action.edit = workspaceEdit;
 
                     result.push_back(action);

@@ -768,4 +768,85 @@ TEST_CASE_FIXTURE(Fixture, "sourcemap_unknown_symbol_fix_suggests_string_require
     )"));
 }
 
+TEST_CASE_FIXTURE(Fixture, "misspelled_property_fix_preserves_the_receiver")
+{
+    size_t index = 0;
+    for (const auto& [source, expected] : std::vector<std::pair<std::string, std::string>>{
+             {"local t = {}\nfunction t.Foo() return 7 end\nreturn t.fOo()\n", "local t = {}\nfunction t.Foo() return 7 end\nreturn t.Foo()\n"},
+             {"local t = {value = 7}\nfunction t:Foo() return self.value end\nreturn t:fOo()\n",
+                 "local t = {value = 7}\nfunction t:Foo() return self.value end\nreturn t:Foo()\n"},
+             {"local function make(): {Foo: number} return {Foo = 7} end\nreturn make().fOo\n",
+                 "local function make(): {Foo: number} return {Foo = 7} end\nreturn make().Foo\n"},
+         })
+    {
+        CAPTURE(source);
+        auto uri = newDocument("receiver-" + std::to_string(index++) + ".luau", source);
+        lsp::CodeActionParams params;
+        params.textDocument.uri = uri;
+        params.range = {{0, 0}, workspace.fileResolver.getTextDocument(uri)->positionAt(source.size())};
+        params.context.only = {lsp::CodeActionKind::QuickFix};
+        auto result = workspace.codeAction(params, nullptr);
+        auto action = findCodeAction(result, "Change 'fOo' to 'Foo'");
+        REQUIRE(action);
+        REQUIRE(action->edit);
+        auto edited = applyEdit(source, action->edit->changes.at(uri));
+        CHECK_EQ(edited, expected);
+        CHECK(check(edited).errors.empty());
+    }
+}
+
+TEST_CASE_FIXTURE(Fixture, "misspelled_property_fix_preserves_string_key_delimiters")
+{
+    ENABLE_NEW_SOLVER();
+    size_t index = 0;
+    for (const auto& [literal, expectedLiteral] : std::vector<std::pair<std::string, std::string>>{
+             {"\"fOo\"", "\"Foo\""},
+             {"'fOo'", "'Foo'"},
+             {"`fOo`", "`Foo`"},
+             {"[[fOo]]", "[[Foo]]"},
+             {"[=[fOo]=]", "[=[Foo]=]"},
+             {"[==[\nfOo]==]", "[==[\nFoo]==]"},
+             {"[==[\r\nfOo]==]", "[==[\r\nFoo]==]"},
+         })
+    {
+        CAPTURE(literal);
+        std::string source = "--!strict\nlocal t: {Foo: number} = {Foo = 7}\nreturn t[ " + literal + " ]\n";
+        auto uri = newDocument("literal-" + std::to_string(index++) + ".luau", source);
+        lsp::CodeActionParams params;
+        params.textDocument.uri = uri;
+        params.range = {{0, 0}, workspace.fileResolver.getTextDocument(uri)->positionAt(source.size())};
+        params.context.only = {lsp::CodeActionKind::QuickFix};
+        auto result = workspace.codeAction(params, nullptr);
+        auto action = findCodeAction(result, "Change 'fOo' to 'Foo'");
+        REQUIRE(action);
+        REQUIRE(action->edit);
+        auto edited = applyEdit(source, action->edit->changes.at(uri));
+        CHECK_EQ(edited, "--!strict\nlocal t: {Foo: number} = {Foo = 7}\nreturn t[ " + expectedLiteral + " ]\n");
+        CHECK(check(edited).errors.empty());
+    }
+}
+
+TEST_CASE_FIXTURE(Fixture, "misspelled_property_fix_handles_reserved_names")
+{
+    std::string source = "local t: {[\"end\"]: number} = {[\"end\"] = 7}\nreturn t.End\n";
+    auto uri = newDocument("reserved.luau", source);
+    lsp::CodeActionParams params;
+    params.textDocument.uri = uri;
+    params.range = {{0, 0}, workspace.fileResolver.getTextDocument(uri)->positionAt(source.size())};
+    params.context.only = {lsp::CodeActionKind::QuickFix};
+    auto result = workspace.codeAction(params, nullptr);
+    auto action = findCodeAction(result, "Change 'End' to 'end'");
+    REQUIRE(action);
+    REQUIRE(action->edit);
+    auto edited = applyEdit(source, action->edit->changes.at(uri));
+    CHECK_EQ(edited, "local t: {[\"end\"]: number} = {[\"end\"] = 7}\nreturn t[\"end\"]\n");
+    CHECK(check(edited).errors.empty());
+
+    uri = newDocument("reserved-method.luau", "local t = {[\"end\"] = function() return 7 end}\nreturn t:End()\n");
+    params.textDocument.uri = uri;
+    params.range.end = {2, 0};
+    result = workspace.codeAction(params, nullptr);
+    CHECK_FALSE(findCodeAction(result, "Change 'End' to 'end'"));
+}
+
 TEST_SUITE_END();
