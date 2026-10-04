@@ -455,11 +455,20 @@ struct InlayHintVisitor : public Luau::AstVisitor
                     }
                 }
 
-                if (func->vararg && it.tail())
+                if (func->vararg && !func->varargAnnotation)
                 {
-                    auto varargType = *it.tail();
-                    if (!func->varargAnnotation)
+                    // The remaining fixed types belong to the vararg too. tail() requires an exhausted iterator.
+                    std::vector<Luau::TypeId> head;
+                    while (it != Luau::end(ftv->argTypes))
                     {
+                        head.push_back(*it);
+                        it++;
+                    }
+                    auto tail = it.tail();
+                    if (!head.empty() || tail)
+                    {
+                        Luau::TypeArena arena;
+                        auto varargType = head.empty() ? *tail : arena.addTypePack(std::move(head), tail);
                         lsp::InlayHint hint;
                         hint.kind = lsp::InlayHintKind::Type;
                         hint.position = textDocument->convertPosition(func->varargLocation.end);

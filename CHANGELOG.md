@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Vararg inlay hints no longer assert in Debug builds when a callback has remaining fixed argument types
 - Inlay hints no longer offer to insert a type that would not be valid where it is inserted: an inferred generic (`: a`, `: a...`), a negation (`: string & ~"init"`), the bare `function` type, an unquoted keyword, empty or numeric table field name, a named table alias that is unavailable or means a different type in the insertion scope, or a list of types on a vararg (`...: (string, ...number)`). The hint is still shown
 
 ### Changed

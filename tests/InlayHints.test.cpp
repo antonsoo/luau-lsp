@@ -1260,11 +1260,13 @@ TEST_CASE_FIXTURE(Fixture, "inlay_hint_for_bare_function_type_is_not_insertable"
     CHECK(result[0].textEdits.empty());
 }
 
-TEST_CASE_FIXTURE(Fixture, "inlay_hint_for_return_pack_containing_bare_function_is_not_insertable")
+TEST_CASE("inlay_hint_for_return_pack_containing_bare_function_is_not_insertable")
 {
-    ENABLE_NEW_SOLVER();
-    client->globalConfig.inlayHints.functionReturnTypes = true;
-    auto result = processInlayHint(this, R"(
+    // Initialize the fixture and its globals with the same solver mode.
+    ScopedFastFlag newSolver{FFlag::LuauSolverV2, true};
+    Fixture fixture;
+    fixture.client->globalConfig.inlayHints.functionReturnTypes = true;
+    auto result = processInlayHint(&fixture, R"(
         local function inspect(value: unknown)
             if type(value) == "function" then
                 return value, true
@@ -1522,6 +1524,43 @@ TEST_CASE_FIXTURE(Fixture, "inlay_hints_do_not_insert_a_different_table_alias_wi
         });
     REQUIRE(hint != hints.end());
     CHECK(hint->textEdits.empty());
+}
+
+TEST_CASE_FIXTURE(Fixture, "inlay_hint_vararg_uses_only_the_remaining_callback_argument_types")
+{
+    client->globalConfig.inlayHints.parameterTypes = true;
+    std::string parameters;
+    std::string expected;
+    bool insertable = false;
+    SUBCASE("no named parameters")
+    {
+        expected = ": (string, number, ...boolean)";
+    }
+    SUBCASE("one named parameter")
+    {
+        parameters = "first: string, ";
+        expected = ": (number, ...boolean)";
+    }
+    SUBCASE("all fixed parameters named")
+    {
+        parameters = "first: string, second: number, ";
+        expected = ": boolean";
+        insertable = true;
+    }
+    auto source = "--!strict\nlocal function consume(_: (string, number, ...boolean) -> ()) end\n"
+                  "consume(function(" +
+                  parameters + "...) print(...) end)";
+    auto hints = processInlayHint(this, source);
+    REQUIRE_EQ(hints.size(), 1);
+    if (FFlag::LuauSolverV2)
+    {
+        expected = ": any";
+        insertable = true;
+    }
+    CHECK_EQ(labelToString(hints[0].label), expected);
+    CHECK_EQ(hints[0].textEdits.size(), insertable ? 1 : 0);
+    if (insertable)
+        CHECK_EQ(hints[0].textEdits[0].newText, expected);
 }
 
 TEST_SUITE_END();
