@@ -479,25 +479,80 @@ TEST_CASE_FIXTURE(Fixture, "rename_type_alias_from_usage")
     )");
 }
 
-TEST_CASE_FIXTURE(Fixture, "rename_generic_type_parameter_of_enclosing_function_from_nested_function")
+TEST_CASE_FIXTURE(Fixture, "disallow_renaming_of_builtin_number_with_array_shorthand")
 {
-    auto source = R"(
-        local function outer<T>(x: T)
-            local function inner(y: T)
-            end
-        end
-    )";
-
+    auto [source, position] = sourceWithMarker("type Array<T> = { T }\nlocal x: num|ber = 1");
     auto uri = newDocument("foo.luau", source);
 
     lsp::RenameParams params;
     params.textDocument = lsp::TextDocumentIdentifier{uri};
-    params.position = lsp::Position{2, 36}; // 'T' in the nested function
+    params.position = position;
+    params.newName = "Value";
+
+    REQUIRE_THROWS_WITH_AS(workspace.rename(params, nullptr), "Cannot rename a type that is not defined in this file", JsonRpcException);
+}
+
+TEST_CASE_FIXTURE(Fixture, "disallow_renaming_of_implicit_self_captured_by_closure")
+{
+    auto [source, position] = sourceWithMarker("local Class = {}\nfunction Class:method() return function() return se|lf end end");
+    auto uri = newDocument("foo.luau", source);
+
+    lsp::RenameParams params;
+    params.textDocument = lsp::TextDocumentIdentifier{uri};
+    params.position = position;
+    params.newName = "this";
+
+    REQUIRE_THROWS_WITH_AS(workspace.rename(params, nullptr), "Cannot rename the implicit self of a method", JsonRpcException);
+}
+
+TEST_CASE_FIXTURE(Fixture, "rename_local_that_shadows_implicit_self")
+{
+    auto [source, position] = sourceWithMarker("local Class = {}\nfunction Class:method() local self = 1 return se|lf end");
+    auto uri = newDocument("foo.luau", source);
+
+    lsp::RenameParams params;
+    params.textDocument = lsp::TextDocumentIdentifier{uri};
+    params.position = position;
+    params.newName = "value";
+
+    auto result = workspace.rename(params, nullptr);
+    REQUIRE(result);
+    REQUIRE(result->changes.size() == 1);
+    CHECK_EQ(applyEdit(source, result->changes.at(uri)), "local Class = {}\nfunction Class:method() local value = 1 return value end");
+}
+
+TEST_CASE_FIXTURE(Fixture, "rename_generic_parameter_with_builtin_name")
+{
+    auto [source, position] = sourceWithMarker("local function identity<number>(x: num|ber): number return x end");
+    auto uri = newDocument("foo.luau", source);
+
+    lsp::RenameParams params;
+    params.textDocument = lsp::TextDocumentIdentifier{uri};
+    params.position = position;
     params.newName = "Value";
 
     auto result = workspace.rename(params, nullptr);
     REQUIRE(result);
     REQUIRE(result->changes.size() == 1);
+    CHECK_EQ(applyEdit(source, result->changes.at(uri)), "local function identity<Value>(x: Value): Value return x end");
+}
+
+TEST_CASE_FIXTURE(Fixture, "rename_number_alias_does_not_insert_into_array_shorthand")
+{
+    ENABLE_NEW_SOLVER();
+
+    auto [source, position] = sourceWithMarker("type number = string\nlocal x: num|ber = 'x'\ntype Array = { string }");
+    auto uri = newDocument("foo.luau", source);
+
+    lsp::RenameParams params;
+    params.textDocument = lsp::TextDocumentIdentifier{uri};
+    params.position = position;
+    params.newName = "Value";
+
+    auto result = workspace.rename(params, nullptr);
+    REQUIRE(result);
+    REQUIRE(result->changes.size() == 1);
+    CHECK_EQ(applyEdit(source, result->changes.at(uri)), "type Value = string\nlocal x: Value = 'x'\ntype Array = { string }");
 }
 
 TEST_CASE_FIXTURE(Fixture, "dont_rename_cross_module_usages_of_a_returned_local_function")

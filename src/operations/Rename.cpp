@@ -193,6 +193,13 @@ lsp::RenameResult WorkspaceFolder::rename(const lsp::RenameParams& params, const
             lsp::ErrorCode::RequestFailed, "The new name must be a valid identifier composed of characters, digits, and underscores only");
 
     auto references = getReferencesForRenaming(this, params, cancellationToken);
+    // Synthetic references, such as the implicit number indexer of { T }, have no source text to rename.
+    references.erase(std::remove_if(references.begin(), references.end(),
+                         [](const lsp::Location& reference)
+                         {
+                             return reference.range.start == reference.range.end;
+                         }),
+        references.end());
     if (references.empty())
         throw JsonRpcException(lsp::ErrorCode::RequestFailed, "Unable to find symbol to rename");
 
