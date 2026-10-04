@@ -3,6 +3,8 @@
 #include "LSP/IostreamHelpers.hpp"
 #include "Luau/Common.h"
 
+#include <algorithm>
+
 TEST_SUITE_BEGIN("InlayHints");
 
 static std::string labelToString(const std::vector<lsp::InlayHintLabelPart>& parts)
@@ -1327,6 +1329,199 @@ TEST_CASE_FIXTURE(Fixture, "inlay_hint_for_named_table_with_keyword_field_is_ins
     REQUIRE_EQ(result.size(), 1);
     REQUIRE_EQ(result[0].textEdits.size(), 1);
     CHECK_EQ(result[0].textEdits[0].newText, ": Options");
+}
+
+TEST_CASE_FIXTURE(Fixture, "inlay_hints_do_not_insert_imported_table_names_without_their_prefix")
+{
+    switchToStandardPlatform();
+    tempDir.touch_child("Types.luau");
+    client->globalConfig.inlayHints.variableTypes = true;
+    newDocument("Types.luau", R"(
+        export type Item = { value: number }
+        export type Box<T> = { value: T }
+        type Hidden = { secret: string }
+        local function create(): Item return { value = 1 } end
+        local function box(): Box<number> return { value = 1 } end
+        local function hidden(): Hidden return { secret = "value" } end
+        return { create = create, box = box, hidden = hidden }
+    )");
+
+    std::string marked;
+    SUBCASE("local")
+    {
+        marked = "local value| = Types.create()";
+    }
+    SUBCASE("generic instance")
+    {
+        marked = "local value| = Types.box()";
+    }
+    SUBCASE("nested table")
+    {
+        marked = "local function create() return { inner = Types.create() } end\nlocal value| = create()";
+    }
+    SUBCASE("unexported type")
+    {
+        marked = "local value| = Types.hidden()";
+    }
+    SUBCASE("loop variable")
+    {
+        marked = "local values = { Types.create() }\nfor _, value| in values do print(value) end";
+    }
+
+    auto [source, position] = sourceWithMarker("local Types = require('./Types')\n" + marked);
+    LUAU_LSP_REQUIRE_NO_ERRORS(check(source));
+    auto hints = processInlayHint(this, source);
+    auto hint = std::find_if(hints.begin(), hints.end(),
+        [position = position](const auto& hint)
+        {
+            return hint.position == position;
+        });
+    REQUIRE(hint != hints.end());
+    CHECK(!labelToString(hint->label).empty());
+    CHECK(hint->textEdits.empty());
+}
+
+TEST_CASE_FIXTURE(Fixture, "inlay_hints_do_not_insert_imported_table_names_in_return_packs")
+{
+    switchToStandardPlatform();
+    tempDir.touch_child("Types.luau");
+    client->globalConfig.inlayHints.functionReturnTypes = true;
+    newDocument("Types.luau", R"(
+        export type Item = { value: number }
+        local function create(): Item return { value = 1 } end
+        return { create = create }
+    )");
+
+    std::string values;
+    SUBCASE("one return")
+    {
+        values = "Types.create()";
+    }
+    SUBCASE("multiple returns")
+    {
+        values = "Types.create(), 1";
+    }
+    auto [source, position] = sourceWithMarker("local Types = require('./Types')\nlocal function create()| return " + values + " end");
+    LUAU_LSP_REQUIRE_NO_ERRORS(check(source));
+    auto hints = processInlayHint(this, source);
+    REQUIRE_EQ(hints.size(), 1);
+    CHECK_EQ(hints[0].position, position);
+    CHECK(hints[0].textEdits.empty());
+}
+
+TEST_CASE_FIXTURE(Fixture, "inlay_hints_do_not_insert_imported_table_names_on_callback_parameters")
+{
+    switchToStandardPlatform();
+    tempDir.touch_child("Types.luau");
+    client->globalConfig.inlayHints.parameterTypes = true;
+    newDocument("Types.luau", R"(
+        export type Item = { value: number }
+        local function consume(_: (Item) -> ()) end
+        return { consume = consume }
+    )");
+    auto [source, position] = sourceWithMarker("local Types = require('./Types')\nTypes.consume(function(value|) print(value) end)");
+    LUAU_LSP_REQUIRE_NO_ERRORS(check(source));
+    auto hints = processInlayHint(this, source);
+    REQUIRE_EQ(hints.size(), 1);
+    CHECK_EQ(hints[0].position, position);
+    CHECK_EQ(labelToString(hints[0].label), ": Item");
+    CHECK(hints[0].textEdits.empty());
+}
+
+TEST_CASE_FIXTURE(Fixture, "inlay_hints_keep_visible_local_table_aliases_insertable")
+{
+    switchToStandardPlatform();
+    tempDir.touch_child("Types.luau");
+    client->globalConfig.inlayHints.variableTypes = true;
+    newDocument("Types.luau", R"(
+        export type Item = { value: number }
+        export type Box<T> = { value: T }
+        local function create(): Item return { value = 1 } end
+        local function box(): Box<number> return { value = 1 } end
+        return { create = create, box = box }
+    )");
+
+    std::string marked;
+    std::string expected;
+    SUBCASE("private table")
+    {
+        marked = "type Item = { value: number }\nlocal function create(): Item return { value = 1 } end\nlocal value| = create()";
+        expected = ": Item";
+    }
+    SUBCASE("private generic instance")
+    {
+        marked = "type Box<T> = { value: T }\nlocal function create(): Box<number> return { value = 1 } end\nlocal value| = create()";
+        expected = ": Box<number>";
+    }
+    SUBCASE("same-named imported and local types")
+    {
+        marked = "local Types = require('./Types')\ntype Item = { value: number }\n"
+                 "local function create(): Item return { value = 1 } end\nlocal value| = create()";
+        expected = ": Item";
+    }
+    SUBCASE("local reexport")
+    {
+        marked = "local Types = require('./Types')\ntype Item = Types.Item\nlocal value| = Types.create()";
+        expected = ": Item";
+    }
+    SUBCASE("local generic reexport")
+    {
+        marked = "local Types = require('./Types')\ntype Box<T> = Types.Box<T>\nlocal value| = Types.box()";
+        expected = ": Box<number>";
+    }
+
+    auto [source, position] = sourceWithMarker(marked);
+    LUAU_LSP_REQUIRE_NO_ERRORS(check(source));
+    auto hints = processInlayHint(this, source);
+    auto hint = std::find_if(hints.begin(), hints.end(),
+        [position = position](const auto& hint)
+        {
+            return hint.position == position;
+        });
+    REQUIRE(hint != hints.end());
+    CHECK_EQ(labelToString(hint->label), expected);
+    REQUIRE_EQ(hint->textEdits.size(), 1);
+    CHECK_EQ(hint->textEdits[0].newText, expected);
+}
+
+TEST_CASE_FIXTURE(Fixture, "inlay_hints_do_not_insert_a_different_table_alias_with_the_same_name")
+{
+    switchToStandardPlatform();
+    tempDir.touch_child("Types.luau");
+    client->globalConfig.inlayHints.variableTypes = true;
+    newDocument("Types.luau", R"(
+        export type Item = { value: number }
+        export type Box<T> = { value: T }
+        local function create(): Item return { value = 1 } end
+        local function box(): Box<number> return { value = 1 } end
+        return { create = create, box = box }
+    )");
+
+    std::string marked;
+    SUBCASE("imported table with wrong local alias")
+    {
+        marked = "local Types = require('./Types')\ntype Item = { wrong: string }\nlocal value| = Types.create()";
+    }
+    SUBCASE("imported generic table with wrong local alias")
+    {
+        marked = "local Types = require('./Types')\ntype Box<T> = { wrong: T }\nlocal value| = Types.box()";
+    }
+    SUBCASE("shadowed local alias")
+    {
+        marked = "type Item = { value: number }\nlocal function create(): Item return { value = 1 } end\n"
+                 "do\ntype Item = { wrong: string }\nlocal value| = create()\nend";
+    }
+
+    auto [source, position] = sourceWithMarker(marked);
+    LUAU_LSP_REQUIRE_NO_ERRORS(check(source));
+    auto hints = processInlayHint(this, source);
+    auto hint = std::find_if(hints.begin(), hints.end(),
+        [position = position](const auto& hint)
+        {
+            return hint.position == position;
+        });
+    REQUIRE(hint != hints.end());
+    CHECK(hint->textEdits.empty());
 }
 
 TEST_SUITE_END();

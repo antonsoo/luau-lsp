@@ -5,9 +5,11 @@
 
 #include "Luau/Ast.h"
 #include "Luau/AstQuery.h"
+#include "Luau/ApplyTypeFunction.h"
 #include "Luau/Lexer.h"
 #include "Luau/StringUtils.h"
 #include "Luau/ToString.h"
+#include "Luau/TypeArena.h"
 #include "Luau/PrettyPrinter.h"
 #include "LSP/LuauExt.hpp"
 
@@ -77,6 +79,7 @@ bool isNoOpFunction(const Luau::AstExprFunction* func)
 // declares them, such as `<a>(a) -> a`.
 struct UnnameableTypeFinder
 {
+    Luau::ScopePtr scope;
     // Generics declared by the function types we are currently inside
     std::vector<const void*> declaredGenerics;
     std::vector<Luau::TypeId> visiting;
@@ -130,6 +133,31 @@ struct UnnameableTypeFinder
     }
 
 private:
+    bool isTableNameVisible(Luau::TypeId ty, const Luau::TableType& table)
+    {
+        auto binding = scope ? scope->lookupType(*table.name) : std::nullopt;
+        if (!binding)
+            return false;
+
+        auto boundTy = Luau::follow(binding->type);
+        if (boundTy == ty)
+            return true;
+        if (binding->typeParams.size() != table.instantiatedTypeParams.size() ||
+            binding->typePackParams.size() != table.instantiatedTypePackParams.size())
+            return false;
+
+        // A generic instance is a distinct type. Apply its arguments before comparing the visible alias;
+        // checking only the name would accept a different local alias that shadows an imported type.
+        Luau::TypeArena arena;
+        Luau::ApplyTypeFunction substitution{&arena};
+        for (size_t i = 0; i < binding->typeParams.size(); i++)
+            substitution.typeArguments[binding->typeParams[i].ty] = table.instantiatedTypeParams[i];
+        for (size_t i = 0; i < binding->typePackParams.size(); i++)
+            substitution.typePackArguments[binding->typePackParams[i].tp] = table.instantiatedTypePackParams[i];
+        auto instantiated = substitution.substitute(boundTy);
+        return instantiated && *Luau::follow(*instantiated) == *ty;
+    }
+
     bool findInChildren(Luau::TypeId ty)
     {
         if (auto ftv = Luau::get<Luau::FunctionType>(ty))
@@ -148,6 +176,9 @@ private:
             // A named table is printed as its name and type arguments
             if (ttv->name || ttv->syntheticName)
             {
+                if (ttv->name && !isTableNameVisible(ty, *ttv))
+                    return true;
+
                 for (auto param : ttv->instantiatedTypeParams)
                     if (find(param))
                         return true;
@@ -195,7 +226,7 @@ private:
 };
 
 // Adds a text edit onto the hint so that it can be inserted.
-void makeInsertable(const ClientConfiguration& config, lsp::InlayHint& hint, Luau::TypeId ty)
+void makeInsertable(const ClientConfiguration& config, lsp::InlayHint& hint, Luau::TypeId ty, const Luau::ScopePtr& scope)
 {
     if (!config.inlayHints.makeInsertable)
         return;
@@ -204,12 +235,13 @@ void makeInsertable(const ClientConfiguration& config, lsp::InlayHint& hint, Lua
     auto result = Luau::toStringDetailed(ty, opts);
     if (result.invalid || result.truncated || result.error || result.cycle)
         return;
-    if (UnnameableTypeFinder{}.find(ty))
+    if (UnnameableTypeFinder{scope}.find(ty))
         return;
     hint.textEdits.emplace_back(lsp::TextEdit{{hint.position, hint.position}, ": " + result.name});
 }
 
-void makeInsertable(const ClientConfiguration& config, lsp::InlayHint& hint, Luau::TypePackId ty, bool removeLeadingEllipsis = false)
+void makeInsertable(
+    const ClientConfiguration& config, lsp::InlayHint& hint, Luau::TypePackId ty, const Luau::ScopePtr& scope, bool removeLeadingEllipsis = false)
 {
     if (!config.inlayHints.makeInsertable)
         return;
@@ -221,7 +253,7 @@ void makeInsertable(const ClientConfiguration& config, lsp::InlayHint& hint, Lua
     auto result = types::toStringReturnTypeDetailed(ty);
     if (result.invalid || result.truncated || result.error || result.cycle)
         return;
-    if (UnnameableTypeFinder{}.find(ty))
+    if (UnnameableTypeFinder{scope}.find(ty))
         return;
     auto name = result.name;
     if (removeLeadingEllipsis)
@@ -314,7 +346,7 @@ struct InlayHintVisitor : public Luau::AstVisitor
                     hint.kind = lsp::InlayHintKind::Type;
                     hint.position = textDocument->convertPosition(var->location.end);
                     setLabelFromType(hint, followedTy);
-                    makeInsertable(config, hint, followedTy);
+                    makeInsertable(config, hint, followedTy, scope);
                     hints.emplace_back(hint);
                 }
             }
@@ -360,7 +392,7 @@ struct InlayHintVisitor : public Luau::AstVisitor
                     hint.kind = lsp::InlayHintKind::Type;
                     hint.position = textDocument->convertPosition(var->location.end);
                     setLabelFromType(hint, followedTy);
-                    makeInsertable(config, hint, followedTy);
+                    makeInsertable(config, hint, followedTy, scope);
                     hints.emplace_back(hint);
                 }
             }
@@ -371,6 +403,7 @@ struct InlayHintVisitor : public Luau::AstVisitor
 
     bool visit(Luau::AstExprFunction* func) override
     {
+        auto scope = Luau::findScopeAtPosition(*module, func->location.begin);
         auto ty = module->astTypes.find(func);
         if (!ty)
             return false;
@@ -387,7 +420,7 @@ struct InlayHintVisitor : public Luau::AstVisitor
                     hint.kind = lsp::InlayHintKind::Type;
                     hint.position = textDocument->convertPosition(func->argLocation->end);
                     setLabelFromTypePack(hint, ftv->retTypes);
-                    makeInsertable(config, hint, ftv->retTypes);
+                    makeInsertable(config, hint, ftv->retTypes, scope);
                     hints.emplace_back(hint);
                 }
             }
@@ -414,7 +447,7 @@ struct InlayHintVisitor : public Luau::AstVisitor
                             hint.kind = lsp::InlayHintKind::Type;
                             hint.position = textDocument->convertPosition(param->location.end);
                             setLabelFromType(hint, argType);
-                            makeInsertable(config, hint, argType);
+                            makeInsertable(config, hint, argType, scope);
                             hints.emplace_back(hint);
                         }
 
@@ -431,7 +464,7 @@ struct InlayHintVisitor : public Luau::AstVisitor
                         hint.kind = lsp::InlayHintKind::Type;
                         hint.position = textDocument->convertPosition(func->varargLocation.end);
                         setLabelFromTypePack(hint, varargType, ": ", /* removeEllipsis: */ true);
-                        makeInsertable(config, hint, varargType, /* removeLeadingEllipsis: */ true);
+                        makeInsertable(config, hint, varargType, scope, /* removeLeadingEllipsis: */ true);
                         hints.emplace_back(hint);
                     }
                 }
