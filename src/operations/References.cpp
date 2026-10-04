@@ -601,6 +601,16 @@ lsp::ReferenceResult WorkspaceFolder::references(const lsp::ReferenceParams& par
         else
         {
             auto references = findTypeReferences(*sourceModule, reference->name.value, position);
+            auto scope = module->getModuleScope();
+            if (scope->exportedTypeBindings.count(reference->name.value))
+            {
+                auto declaration = scope->typeAliasNameLocations.find(reference->name.value);
+                if (declaration != scope->typeAliasNameLocations.end() && contains(references, declaration->second))
+                {
+                    auto allReferences = findAllTypeReferences(moduleName, reference->name.value, cancellationToken);
+                    return processReferences(fileResolver, allReferences);
+                }
+            }
             for (auto& location : references)
                 result.emplace_back(lsp::Location{
                     params.textDocument.uri, {textDocument->convertPosition(location.begin), textDocument->convertPosition(location.end)}});

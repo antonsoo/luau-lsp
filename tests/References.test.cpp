@@ -8,6 +8,30 @@ TEST_SUITE_BEGIN("References");
 // TODO: cross module tests
 // TODO: type references tests (cross module)
 
+TEST_CASE_FIXTURE(Fixture, "exported_type_references_from_internal_use")
+{
+    switchToStandardPlatform();
+    tempDir.touch_child("types.luau");
+    auto types = newDocument("types.luau", "export type Item = number\nlocal value: Item = 1\nreturn {}\n");
+    auto user = newDocument("user.luau", "local Types = require('./types')\nlocal value: Types.Item = 1\n");
+    workspace.checkStrict(workspace.fileResolver.getModuleName(user), nullptr);
+    REQUIRE(workspace.frontend.check(workspace.fileResolver.getModuleName(user)).errors.empty());
+
+    lsp::ReferenceParams params;
+    params.textDocument = lsp::TextDocumentIdentifier{types};
+    params.position = lsp::Position{1, 15};
+    params.context.includeDeclaration = true;
+    auto result = workspace.references(params, nullptr);
+    REQUIRE(result);
+    REQUIRE_EQ(result->size(), 3);
+    CHECK_EQ(std::count_if(result->begin(), result->end(),
+                 [&](const lsp::Location& reference)
+                 {
+                     return reference.uri == user;
+                 }),
+        1);
+}
+
 static void sortResults(std::optional<std::vector<lsp::Location>>& result)
 {
     std::sort(result->begin(), result->end(),

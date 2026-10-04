@@ -1016,6 +1016,11 @@ return {})");
     params.textDocument = lsp::TextDocumentIdentifier{types};
     params.position = position;
     params.newName = "Renamed";
+    SUBCASE("from_declaration") {}
+    SUBCASE("from_internal_use")
+    {
+        params.position = lsp::Position{5, 15};
+    }
     auto result = workspace.rename(params, nullptr);
     REQUIRE(result);
     REQUIRE(result->changes.size() == 2);
@@ -1027,6 +1032,36 @@ end
 local outer: Renamed = 1
 return {})");
     CHECK_EQ(applyEdit(consumerSource, result->changes.at(consumer)), "local Types = require(game.Testing.Types)\nlocal x: Types.Renamed = 1");
+}
+
+TEST_CASE_FIXTURE(Fixture, "rename_internal_shadow_of_exported_alias_stays_local")
+{
+    std::string markedSource =
+        "export type Item = number\nlocal function identity<Item>(x: Item|): Item return x end\nlocal value: Item = 1\nreturn {}\n";
+    std::string expected =
+        "export type Item = number\nlocal function identity<Renamed>(x: Renamed): Renamed return x end\nlocal value: Item = 1\nreturn {}\n";
+    SUBCASE("generic") {}
+    SUBCASE("block_alias")
+    {
+        markedSource = "export type Item = number\ndo\n    type Item = number\n    local value: Item| = 1\nend\nlocal value: Item = 1\nreturn {}\n";
+        expected = "export type Item = number\ndo\n    type Renamed = number\n    local value: Renamed = 1\nend\nlocal value: Item = 1\nreturn {}\n";
+    }
+    auto [source, position] = sourceWithMarker(markedSource);
+    switchToStandardPlatform();
+    tempDir.touch_child("types.luau");
+    auto types = newDocument("types.luau", source);
+    auto user = newDocument("user.luau", "local Types = require('./types')\nlocal value: Types.Item = 1\n");
+    workspace.checkStrict(workspace.fileResolver.getModuleName(user), nullptr);
+    REQUIRE(workspace.frontend.check(workspace.fileResolver.getModuleName(user)).errors.empty());
+
+    lsp::RenameParams params;
+    params.textDocument = lsp::TextDocumentIdentifier{types};
+    params.position = position;
+    params.newName = "Renamed";
+    auto result = workspace.rename(params, nullptr);
+    REQUIRE(result);
+    REQUIRE_EQ(result->changes.size(), 1);
+    CHECK_EQ(applyEdit(source, result->changes.at(types)), expected);
 }
 
 TEST_CASE_FIXTURE(Fixture, "rename_scoped_pack_default")

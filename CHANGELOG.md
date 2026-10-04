@@ -9,6 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Fixed
 
 - Rename and Find All References now distinguish shadowed type aliases and generic parameters, including captured generics and type packs in nested functions and default arguments.
+- Starting References or Rename from an internal use of an exported alias now includes importing files while preserving local and generic shadows.
 
 ### Changed
 
