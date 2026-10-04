@@ -10,6 +10,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - Sync to upstream Luau 0.741
 
+### Fixed
+
+- References and Rename for exported types now include every import alias when a file requires the same module more than once.
+
 ## [1.70.1] - 2026-09-27
 
 ### Added

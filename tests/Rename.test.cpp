@@ -3,6 +3,42 @@
 
 TEST_SUITE_BEGIN("Rename");
 
+TEST_CASE_FIXTURE(Fixture, "rename_exported_type_through_every_import_alias")
+{
+    switchToStandardPlatform();
+    tempDir.touch_child("types.luau");
+    std::string typeSource = "export type Item = number\nlocal value: Item = 1\nreturn {}\n";
+    std::string userSource =
+        "local First = require('./types')\nlocal Second = require('./types')\nlocal a: First.Item = 1\nlocal b: Second.Item = 2\n";
+    auto types = newDocument("types.luau", typeSource);
+    auto user = newDocument("user.luau", userSource);
+    workspace.checkStrict(workspace.fileResolver.getModuleName(user), nullptr);
+    REQUIRE(workspace.frontend.check(workspace.fileResolver.getModuleName(user)).errors.empty());
+
+    lsp::RenameParams params;
+    params.textDocument = lsp::TextDocumentIdentifier{types};
+    params.position = lsp::Position{0, 13};
+    params.newName = "Renamed";
+    SUBCASE("from_declaration") {}
+    SUBCASE("from_first_import")
+    {
+        params.textDocument = lsp::TextDocumentIdentifier{user};
+        params.position = lsp::Position{2, 16};
+    }
+    SUBCASE("from_second_import")
+    {
+        params.textDocument = lsp::TextDocumentIdentifier{user};
+        params.position = lsp::Position{3, 17};
+    }
+
+    auto result = workspace.rename(params, nullptr);
+    REQUIRE(result);
+    REQUIRE_EQ(result->changes.size(), 2);
+    CHECK(applyEdit(typeSource, result->changes.at(types)) == "export type Renamed = number\nlocal value: Renamed = 1\nreturn {}\n");
+    CHECK(applyEdit(userSource, result->changes.at(user)) ==
+          "local First = require('./types')\nlocal Second = require('./types')\nlocal a: First.Renamed = 1\nlocal b: Second.Renamed = 2\n");
+}
+
 TEST_CASE_FIXTURE(Fixture, "fail_if_new_name_is_empty")
 {
     auto uri = newDocument("foo.luau", "");

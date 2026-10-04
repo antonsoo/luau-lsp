@@ -8,6 +8,38 @@ TEST_SUITE_BEGIN("References");
 // TODO: cross module tests
 // TODO: type references tests (cross module)
 
+TEST_CASE_FIXTURE(Fixture, "exported_type_references_include_every_import_alias")
+{
+    switchToStandardPlatform();
+    tempDir.touch_child("types.luau");
+    auto types = newDocument("types.luau", "export type Item = number\nlocal value: Item = 1\nreturn {}\n");
+    auto user = newDocument(
+        "user.luau", "local First = require('./types')\nlocal Second = require('./types')\nlocal a: First.Item = 1\nlocal b: Second.Item = 2\n");
+    workspace.checkStrict(workspace.fileResolver.getModuleName(user), nullptr);
+    REQUIRE(workspace.frontend.check(workspace.fileResolver.getModuleName(user)).errors.empty());
+
+    lsp::ReferenceParams params;
+    params.textDocument = lsp::TextDocumentIdentifier{types};
+    params.position = lsp::Position{0, 13};
+    params.context.includeDeclaration = true;
+    auto result = workspace.references(params, nullptr);
+    REQUIRE(result);
+    REQUIRE_EQ(result->size(), 4);
+
+    std::vector<size_t> typeLines;
+    std::vector<size_t> userLines;
+    for (const auto& reference : *result)
+    {
+        REQUIRE((reference.uri == types || reference.uri == user));
+        CHECK_EQ(reference.range.end.character - reference.range.start.character, 4);
+        (reference.uri == types ? typeLines : userLines).push_back(reference.range.start.line);
+    }
+    std::sort(typeLines.begin(), typeLines.end());
+    std::sort(userLines.begin(), userLines.end());
+    CHECK(typeLines == std::vector<size_t>{0, 1});
+    CHECK(userLines == std::vector<size_t>{2, 3});
+}
+
 static void sortResults(std::optional<std::vector<lsp::Location>>& result)
 {
     std::sort(result->begin(), result->end(),

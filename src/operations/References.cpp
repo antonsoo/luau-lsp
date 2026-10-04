@@ -343,24 +343,17 @@ std::vector<Reference> WorkspaceFolder::findAllTypeReferences(
         auto module = getModule(dependencyModuleName, /* forAutocomplete: */ true);
         if (sourceModule)
         {
-            // Find the import name used
-            Luau::Name importName;
-            for (const auto& [name, mod] : module->getModuleScope()->importedModules)
+            // A dependency can import the same module under several names.
+            for (const auto& [importName, importedModule] : module->getModuleScope()->importedModules)
             {
-                if (mod == moduleName)
-                {
-                    importName = name;
-                    break;
-                }
+                if (importedModule != moduleName)
+                    continue;
+
+                auto references = findTypeReferences(*sourceModule, typeName, importName);
+                result.reserve(result.size() + references.size());
+                for (auto& location : references)
+                    result.emplace_back(Reference{dependencyModuleName, location});
             }
-
-            if (importName.empty())
-                continue;
-
-            auto references = findTypeReferences(*sourceModule, typeName, importName);
-            result.reserve(result.size() + references.size());
-            for (auto& location : references)
-                result.emplace_back(Reference{dependencyModuleName, location});
         }
     }
 
