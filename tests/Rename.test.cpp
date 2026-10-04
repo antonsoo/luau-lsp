@@ -717,4 +717,340 @@ return Bar
     )");
 }
 
+
+
+static void checkScopedTypeRename(Fixture& fixture, std::string markedSource, const std::string& expected)
+{
+    auto [source, position] = sourceWithMarker(std::move(markedSource));
+    auto uri = fixture.newDocument("scoped.luau", source);
+    lsp::RenameParams params;
+    params.textDocument = lsp::TextDocumentIdentifier{uri};
+    params.position = position;
+    params.newName = "Renamed";
+    auto result = fixture.workspace.rename(params, nullptr);
+    REQUIRE(result);
+    REQUIRE(result->changes.size() == 1);
+    CHECK_EQ(applyEdit(source, result->changes.at(uri)), expected);
+}
+
+TEST_CASE_FIXTURE(Fixture, "rename_scoped_captured_generic")
+{
+    checkScopedTypeRename(*this, R"(local function outer<T>(x: T): T
+    local function inner(y: T): T| return y end
+    return inner(x)
+end)",
+        R"(local function outer<Renamed>(x: Renamed): Renamed
+    local function inner(y: Renamed): Renamed return y end
+    return inner(x)
+end)");
+}
+
+TEST_CASE_FIXTURE(Fixture, "rename_scoped_captured_generic_alias")
+{
+    checkScopedTypeRename(*this, R"(local function outer<T>(x: T)
+    type Value = T|
+    local value: Value = x
+    return value
+end)",
+        R"(local function outer<Renamed>(x: Renamed)
+    type Value = Renamed
+    local value: Value = x
+    return value
+end)");
+}
+
+TEST_CASE_FIXTURE(Fixture, "rename_scoped_function_shadow")
+{
+    checkScopedTypeRename(*this, R"(local function outer<T>(x: T): T|
+    local function inner<T>(y: T): T return y end
+    return x
+end)",
+        R"(local function outer<Renamed>(x: Renamed): Renamed
+    local function inner<T>(y: T): T return y end
+    return x
+end)");
+}
+
+TEST_CASE_FIXTURE(Fixture, "rename_scoped_alias_generic_shadow")
+{
+    checkScopedTypeRename(*this, R"(local function outer<T>(x: T): T|
+    type Inner<T> = {value: T}
+    return x
+end)",
+        R"(local function outer<Renamed>(x: Renamed): Renamed
+    type Inner<T> = {value: T}
+    return x
+end)");
+}
+
+TEST_CASE_FIXTURE(Fixture, "rename_scoped_function_type_shadow")
+{
+    checkScopedTypeRename(*this, R"(type Outer<T> = {
+    value: T,
+    callback: <T>(T) -> T,
+    capture: <U>(U, T) -> T|
+})",
+        R"(type Outer<Renamed> = {
+    value: Renamed,
+    callback: <T>(T) -> T,
+    capture: <U>(U, Renamed) -> Renamed
+})");
+}
+
+TEST_CASE_FIXTURE(Fixture, "rename_scoped_inner_generic")
+{
+    checkScopedTypeRename(*this, R"(local function outer<T>(x: T): T
+    local function inner<T>(y: T): T| return y end
+    return x
+end)",
+        R"(local function outer<T>(x: T): T
+    local function inner<Renamed>(y: Renamed): Renamed return y end
+    return x
+end)");
+}
+
+TEST_CASE_FIXTURE(Fixture, "rename_scoped_block_alias_inner")
+{
+    checkScopedTypeRename(*this, R"(type Value = number
+do
+    type Value = string
+    local x: Value| = 'x'
+end
+local y: Value = 1)",
+        R"(type Value = number
+do
+    type Renamed = string
+    local x: Renamed = 'x'
+end
+local y: Value = 1)");
+}
+
+TEST_CASE_FIXTURE(Fixture, "rename_scoped_block_alias_outer")
+{
+    checkScopedTypeRename(*this, R"(type Value = number
+do
+    type Value = string
+    local x: Value = 'x'
+end
+local y: Value| = 1)",
+        R"(type Renamed = number
+do
+    type Value = string
+    local x: Value = 'x'
+end
+local y: Renamed = 1)");
+}
+
+TEST_CASE_FIXTURE(Fixture, "rename_scoped_same_underlying_type")
+{
+    checkScopedTypeRename(*this, R"(type Value = number
+do
+    type Value = number
+    local inner: Value = 1
+end
+local outer: Value| = 1)",
+        R"(type Renamed = number
+do
+    type Value = number
+    local inner: Value = 1
+end
+local outer: Renamed = 1)");
+}
+
+TEST_CASE_FIXTURE(Fixture, "rename_scoped_alias_hoisting")
+{
+    checkScopedTypeRename(*this, R"(type Value = number
+do
+    local before: Value = 'x'
+    type Value = string
+    local after: Value| = 'y'
+end
+local outer: Value = 1)",
+        R"(type Value = number
+do
+    local before: Renamed = 'x'
+    type Renamed = string
+    local after: Renamed = 'y'
+end
+local outer: Value = 1)");
+}
+
+TEST_CASE_FIXTURE(Fixture, "rename_scoped_generic_shadows_alias")
+{
+    checkScopedTypeRename(*this, R"(type T = number
+local function identity<T>(x: T): T| return x end
+local y: T = 1)",
+        R"(type T = number
+local function identity<Renamed>(x: Renamed): Renamed return x end
+local y: T = 1)");
+}
+
+TEST_CASE_FIXTURE(Fixture, "rename_scoped_alias_excludes_generic")
+{
+    checkScopedTypeRename(*this, R"(type T = number
+local function identity<T>(x: T): T return x end
+local y: T| = 1)",
+        R"(type Renamed = number
+local function identity<T>(x: T): T return x end
+local y: Renamed = 1)");
+}
+
+TEST_CASE_FIXTURE(Fixture, "rename_scoped_alias_shadows_generic")
+{
+    checkScopedTypeRename(*this, R"(local function outer<T>(x: T): T|
+    do
+        type T = string
+        local inner: T = 'x'
+    end
+    return x
+end)",
+        R"(local function outer<Renamed>(x: Renamed): Renamed
+    do
+        type T = string
+        local inner: T = 'x'
+    end
+    return x
+end)");
+}
+
+TEST_CASE_FIXTURE(Fixture, "rename_scoped_nested_pack")
+{
+    checkScopedTypeRename(*this, R"(local function outer<T...>(...: T...): T...
+    local function inner(...: T...): T|... return ... end
+    return inner(...)
+end)",
+        R"(local function outer<Renamed...>(...: Renamed...): Renamed...
+    local function inner(...: Renamed...): Renamed... return ... end
+    return inner(...)
+end)");
+}
+
+TEST_CASE_FIXTURE(Fixture, "rename_scoped_pack_shadow")
+{
+    checkScopedTypeRename(*this, R"(local function outer<T...>(...: T...): T|...
+    local function inner<T...>(...: T...): T... return ... end
+    type F<T...> = (T...) -> T...
+    return ...
+end)",
+        R"(local function outer<Renamed...>(...: Renamed...): Renamed...
+    local function inner<T...>(...: T...): T... return ... end
+    type F<T...> = (T...) -> T...
+    return ...
+end)");
+}
+
+TEST_CASE_FIXTURE(Fixture, "rename_scoped_alias_pack")
+{
+    checkScopedTypeRename(*this, R"(type Function<T...> = (T...) -> T|...)", R"(type Function<Renamed...> = (Renamed...) -> Renamed...)");
+}
+
+TEST_CASE_FIXTURE(Fixture, "rename_scoped_generic_default")
+{
+    checkScopedTypeRename(*this, R"(local function outer<T>(x: T)
+    type Inner<U = T> = {outer: T|, inner: U}
+    return x
+end)",
+        R"(local function outer<Renamed>(x: Renamed)
+    type Inner<U = Renamed> = {outer: Renamed, inner: U}
+    return x
+end)");
+}
+
+TEST_CASE_FIXTURE(Fixture, "rename_scoped_shadowing_default")
+{
+    checkScopedTypeRename(*this, R"(local function outer<T>(x: T)
+    type Inner<T = T|> = {inner: T}
+    return x
+end)",
+        R"(local function outer<Renamed>(x: Renamed)
+    type Inner<T = Renamed> = {inner: T}
+    return x
+end)");
+}
+
+TEST_CASE_FIXTURE(Fixture, "rename_scoped_repeat_scope")
+{
+    checkScopedTypeRename(*this, R"(type Value = string
+repeat
+    type Value = number
+    local x: Value = 1
+until (1 :: Value|) == 1
+local y: Value = 'x')",
+        R"(type Value = string
+repeat
+    type Renamed = number
+    local x: Renamed = 1
+until (1 :: Renamed) == 1
+local y: Value = 'x')");
+}
+
+TEST_CASE_FIXTURE(Fixture, "rename_scoped_qualified_type")
+{
+    newDocument("Types.luau", "export type T = number\nreturn {}\n");
+    checkScopedTypeRename(*this, R"(local Types = require('./Types')
+local function outer<T>(x: T, y: Types.T): T|
+    return x
+end)",
+        R"(local Types = require('./Types')
+local function outer<Renamed>(x: Renamed, y: Types.T): Renamed
+    return x
+end)");
+}
+
+TEST_CASE_FIXTURE(Fixture, "rename_scoped_exported_alias_preserves_local_shadows")
+{
+    auto [source, position] = sourceWithMarker(R"(export type Value| = number
+do
+    type Value = string
+    local inner: Value = 'x'
+end
+local outer: Value = 1
+return {})");
+    auto types = newDocument("types.luau", source);
+    registerDocumentForVirtualPath(types, "game/Testing/Types");
+    const std::string consumerSource = "local Types = require(game.Testing.Types)\nlocal x: Types.Value = 1";
+    auto consumer = newDocument("consumer.luau", consumerSource);
+    workspace.checkStrict(workspace.fileResolver.getModuleName(consumer), nullptr);
+
+    lsp::RenameParams params;
+    params.textDocument = lsp::TextDocumentIdentifier{types};
+    params.position = position;
+    params.newName = "Renamed";
+    auto result = workspace.rename(params, nullptr);
+    REQUIRE(result);
+    REQUIRE(result->changes.size() == 2);
+    CHECK_EQ(applyEdit(source, result->changes.at(types)), R"(export type Renamed = number
+do
+    type Value = string
+    local inner: Value = 'x'
+end
+local outer: Renamed = 1
+return {})");
+    CHECK_EQ(applyEdit(consumerSource, result->changes.at(consumer)), "local Types = require(game.Testing.Types)\nlocal x: Types.Renamed = 1");
+}
+
+TEST_CASE_FIXTURE(Fixture, "rename_scoped_pack_default")
+{
+    checkScopedTypeRename(*this, R"(local function outer<T...>(...: T...)
+    type Inner<U... = (|T...)> = (U...) -> T...
+    return ...
+end)",
+        R"(local function outer<Renamed...>(...: Renamed...)
+    type Inner<U... = (Renamed...)> = (U...) -> Renamed...
+    return ...
+end)");
+}
+
+TEST_CASE_FIXTURE(Fixture, "rename_scoped_pack_shadowing_default")
+{
+    checkScopedTypeRename(*this, R"(local function outer<T...>(...: T...)
+    type Inner<T... = (T|...)> = (T...) -> T...
+    return ...
+end)",
+        R"(local function outer<Renamed...>(...: Renamed...)
+    type Inner<T... = (Renamed...)> = (T...) -> T...
+    return ...
+end)");
+}
+
 TEST_SUITE_END();

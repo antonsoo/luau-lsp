@@ -250,14 +250,30 @@ struct FindNodeType : public Luau::AstVisitor
         return visit(static_cast<Luau::AstNode*>(node));
     }
 
+    bool visit(Luau::AstTypePackExplicit* node) override
+    {
+        // Packs in generic defaults can have only '(' as their location.
+        // Select a child first so that the incomplete parent range cannot hide it.
+        auto previous = best;
+        for (auto type : node->typeList.types)
+            type->visit(this);
+        if (node->typeList.tailType)
+            node->typeList.tailType->visit(this);
+        if (best == previous)
+            visit(static_cast<Luau::AstNode*>(node));
+        return false;
+    }
+
     bool visit(Luau::AstGenericType* node) override
     {
-        return false;
+        // Keep the enclosing alias/function as the match for a declaration,
+        // but allow a reference inside its default to be selected.
+        return true;
     }
 
     bool visit(Luau::AstGenericTypePack* node) override
     {
-        return false;
+        return true;
     }
 
     bool visit(Luau::AstStatBlock* block) override
@@ -749,6 +765,174 @@ std::vector<Luau::Location> findTypeReferences(const Luau::SourceModule& source,
     FindTypeReferences finder(typeName, std::move(prefix));
     source.root->visit(&finder);
     return std::move(finder.result);
+}
+
+// Resolve one type name lexically. Type aliases are hoisted within a block,
+// while generic parameters belong to their alias/function and may shadow it.
+struct FindScopedTypeReferences : Luau::AstVisitor
+{
+    const Luau::Name& name;
+    Luau::Position position;
+    Luau::AstNode* binding = nullptr;
+    Luau::AstNode* target = nullptr;
+    bool foundTarget = false;
+    std::vector<std::pair<Luau::AstNode*, Luau::Location>> references;
+
+    FindScopedTypeReferences(const Luau::Name& name, Luau::Position position)
+        : name(name)
+        , position(position)
+    {
+    }
+
+    void record(Luau::AstNode* declaration, const Luau::Location& location)
+    {
+        references.emplace_back(declaration, location);
+        if (location.containsClosed(position))
+        {
+            target = declaration;
+            foundTarget = true;
+        }
+    }
+
+    void bindAliases(Luau::AstStatBlock* block)
+    {
+        for (auto stat : block->body)
+        {
+            if (auto alias = stat->as<Luau::AstStatTypeAlias>(); alias && alias->name.value == name)
+            {
+                binding = alias;
+                return;
+            }
+            if (auto function = stat->as<Luau::AstStatTypeFunction>(); function && function->name.value == name)
+            {
+                binding = function;
+                return;
+            }
+        }
+    }
+
+    template<typename Generics>
+    void bindGenerics(const Generics& generics)
+    {
+        for (auto generic : generics)
+        {
+            // A default sees earlier parameters, but not the parameter being declared.
+            if (generic->defaultValue)
+                generic->defaultValue->visit(this);
+            if (generic->name.value == name)
+            {
+                binding = generic;
+                record(generic, generic->location);
+            }
+        }
+    }
+
+    bool visit(Luau::AstStatBlock* node) override
+    {
+        auto previous = binding;
+        bindAliases(node);
+        for (auto stat : node->body)
+            stat->visit(this);
+        binding = previous;
+        return false;
+    }
+
+    bool visit(Luau::AstStatRepeat* node) override
+    {
+        auto previous = binding;
+        // Unlike while, repeat keeps its body scope in the condition.
+        bindAliases(node->body);
+        node->body->visit(this);
+        node->condition->visit(this);
+        binding = previous;
+        return false;
+    }
+
+    bool visit(Luau::AstStatTypeAlias* node) override
+    {
+        if (node->name.value == name)
+            record(node, node->nameLocation);
+        auto previous = binding;
+        bindGenerics(node->generics);
+        bindGenerics(node->genericPacks);
+        node->type->visit(this);
+        binding = previous;
+        return false;
+    }
+
+    bool visit(Luau::AstStatTypeFunction* node) override
+    {
+        if (node->name.value == name)
+            record(node, node->nameLocation);
+        return true;
+    }
+
+    bool visit(Luau::AstExprFunction* node) override
+    {
+        auto previous = binding;
+        bindGenerics(node->generics);
+        bindGenerics(node->genericPacks);
+        for (auto arg : node->args)
+            if (arg->annotation)
+                arg->annotation->visit(this);
+        if (node->varargAnnotation)
+            node->varargAnnotation->visit(this);
+        if (node->returnAnnotation)
+            node->returnAnnotation->visit(this);
+        node->body->visit(this);
+        binding = previous;
+        return false;
+    }
+
+    bool visit(Luau::AstTypeFunction* node) override
+    {
+        auto previous = binding;
+        bindGenerics(node->generics);
+        bindGenerics(node->genericPacks);
+        for (auto type : node->argTypes.types)
+            type->visit(this);
+        if (node->argTypes.tailType)
+            node->argTypes.tailType->visit(this);
+        node->returnTypes->visit(this);
+        binding = previous;
+        return false;
+    }
+
+    bool visit(Luau::AstType*) override
+    {
+        return true;
+    }
+
+    bool visit(Luau::AstTypePack*) override
+    {
+        return true;
+    }
+
+    bool visit(Luau::AstTypeReference* node) override
+    {
+        if (!node->prefix && node->name.value == name)
+            record(binding, node->nameLocation);
+        return true;
+    }
+
+    bool visit(Luau::AstTypePackGeneric* node) override
+    {
+        if (node->genericName.value == name)
+            record(binding, {node->location.begin, {node->location.end.line, node->location.end.column - 3}});
+        return true;
+    }
+};
+
+std::vector<Luau::Location> findTypeReferences(const Luau::SourceModule& source, const Luau::Name& typeName, Luau::Position position)
+{
+    FindScopedTypeReferences finder(typeName, position);
+    source.root->visit(&finder);
+    std::vector<Luau::Location> result;
+    if (finder.foundTarget)
+        for (const auto& [binding, location] : finder.references)
+            if (binding == finder.target)
+                result.push_back(location);
+    return result;
 }
 
 std::optional<Luau::Location> getLocation(Luau::TypeId type)

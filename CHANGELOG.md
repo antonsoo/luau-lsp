@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Rename and Find All References now distinguish shadowed type aliases and generic parameters, including captured generics and type packs in nested functions and default arguments.
+
 ### Changed
 
 - Sync to upstream Luau 0.741

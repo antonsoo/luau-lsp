@@ -52,6 +52,9 @@ Luau::ExprOrLocal findExprOrLocalAtPositionClosed(const Luau::SourceModule& sour
 std::vector<Luau::Location> findSymbolReferences(const Luau::SourceModule& source, Luau::Symbol symbol);
 std::vector<Luau::Location> findTypeReferences(const Luau::SourceModule& source, const Luau::Name& typeName, std::optional<const Luau::Name> prefix);
 
+/// Find an unqualified type binding at position, including its declaration and excluding shadowed names.
+std::vector<Luau::Location> findTypeReferences(const Luau::SourceModule& source, const Luau::Name& typeName, Luau::Position position);
+
 std::optional<Luau::Location> getLocation(Luau::TypeId type);
 
 std::optional<Luau::Location> lookupTypeLocation(const Luau::Scope& deepScope, const Luau::Name& name);

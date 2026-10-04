@@ -308,25 +308,20 @@ std::vector<Reference> WorkspaceFolder::findAllTypeReferences(
     std::vector<Reference> result;
 
     // Handle the module the type is declared in
-    auto sourceModule = frontend.getSourceModule(moduleName);
-    if (!sourceModule)
-        return {};
-
-    auto references = findTypeReferences(*sourceModule, typeName, std::nullopt);
-    result.reserve(references.size() + 1);
-    for (auto& location : references)
-        result.emplace_back(Reference{moduleName, location});
-
-    // Find the actual declaration location
     checkStrict(moduleName, cancellationToken);
     throwIfCancelled(cancellationToken);
+    auto sourceModule = frontend.getSourceModule(moduleName);
     auto module = getModule(moduleName, /* forAutocomplete: */ true);
-    if (!module)
+    if (!sourceModule || !module)
         return {};
 
     if (auto location = module->getModuleScope()->typeAliasNameLocations.find(typeName);
         location != module->getModuleScope()->typeAliasNameLocations.end())
-        result.emplace_back(Reference{moduleName, location->second});
+    {
+        auto references = findTypeReferences(*sourceModule, typeName, location->second.begin);
+        for (auto& reference : references)
+            result.emplace_back(Reference{moduleName, reference});
+    }
 
     // Find all cross-module references
     auto reverseDependencies = findReverseDependencies(moduleName);
@@ -384,136 +379,9 @@ static std::vector<lsp::Location> processReferences(WorkspaceFileResolver& fileR
 }
 
 
-class FindTypeParameterUsages : public Luau::AstVisitor
-{
-    Luau::AstName name;
-    bool initialNode = true;
-
-    bool visit(class Luau::AstType* node) override
-    {
-        return true;
-    }
-
-    bool visit(class Luau::AstTypeReference* node) override
-    {
-        if (node->name == name)
-            result.emplace_back(node->nameLocation);
-        initialNode = false;
-        return true;
-    }
-
-    bool visit(class Luau::AstTypeFunction* node) override
-    {
-        // Check to see the type parameter has not been redefined
-        for (auto t : node->generics)
-        {
-            if (t->name == name)
-            {
-                if (initialNode)
-                    result.emplace_back(t->location);
-                else
-                    return false;
-            }
-        }
-        for (auto t : node->genericPacks)
-        {
-            if (t->name == name)
-            {
-                if (initialNode)
-                    result.emplace_back(t->location);
-                else
-                    return false;
-            }
-        }
-        initialNode = false;
-        return true;
-    }
-
-    bool visit(class Luau::AstTypePack* node) override
-    {
-        return true;
-    }
-
-    bool visit(class Luau::AstTypePackGeneric* node) override
-    {
-        if (node->genericName == name)
-            // node location also consists of the three dots "...", so we need to remove them
-            result.emplace_back(Luau::Location{node->location.begin, {node->location.end.line, node->location.end.column - 3}});
-        initialNode = false;
-        return true;
-    }
-
-    bool visit(class Luau::AstStatTypeAlias* node) override
-    {
-        for (auto t : node->generics)
-            if (t->name == name)
-                result.emplace_back(t->location);
-        for (auto t : node->genericPacks)
-            if (t->name == name)
-                result.emplace_back(t->location);
-        initialNode = false;
-        return true;
-    }
-
-    bool visit(class Luau::AstExprFunction* node) override
-    {
-        for (auto t : node->generics)
-            if (t->name == name)
-                result.emplace_back(t->location);
-        for (auto t : node->genericPacks)
-            if (t->name == name)
-                result.emplace_back(t->location);
-        initialNode = false;
-        return true;
-    }
-
-public:
-    explicit FindTypeParameterUsages(Luau::AstName name)
-        : name(name)
-    {
-    }
-    std::vector<Luau::Location> result;
-};
-
-
 // Determines whether the name matches a type reference in one of the provided generics
 // If so, we find the usages inside of that node
-bool handleIfTypeReferenceByName(Luau::AstNode* node, Luau::AstArray<Luau::AstGenericType*> generics,
-    Luau::AstArray<Luau::AstGenericTypePack*> genericPacks, Luau::AstName name, std::vector<lsp::Location>& result, const TextDocument* textDocument)
-{
-    bool isTypeReference = false;
-    for (const auto t : generics)
-    {
-        if (t->name == name)
-        {
-            isTypeReference = true;
-            break;
-        }
-    }
-    for (const auto t : genericPacks)
-    {
-        if (t->name == name)
-        {
-            isTypeReference = true;
-            break;
-        }
-    }
-    if (!isTypeReference)
-        return false;
-
-    FindTypeParameterUsages visitor(name);
-    node->visit(&visitor);
-
-    for (auto& location : visitor.result)
-        result.emplace_back(
-            lsp::Location{textDocument->uri(), {textDocument->convertPosition(location.begin), textDocument->convertPosition(location.end)}});
-
-    return true;
-}
-
-// Determines whether the name matches a type reference in one of the provided generics
-// If so, we find the usages inside of that node
-bool handleIfTypeReferenceByPosition(Luau::AstNode* node, Luau::AstArray<Luau::AstGenericType*> generics,
+bool handleIfTypeReferenceByPosition(const Luau::SourceModule& source, Luau::AstArray<Luau::AstGenericType*> generics,
     Luau::AstArray<Luau::AstGenericTypePack*> genericPacks, Luau::Position position, std::vector<lsp::Location>& result,
     const TextDocument* textDocument)
 {
@@ -540,10 +408,8 @@ bool handleIfTypeReferenceByPosition(Luau::AstNode* node, Luau::AstArray<Luau::A
     if (!isTypeReference)
         return false;
 
-    FindTypeParameterUsages visitor(name);
-    node->visit(&visitor);
-
-    for (auto& location : visitor.result)
+    auto references = findTypeReferences(source, name.value, position);
+    for (auto& location : references)
         result.emplace_back(
             lsp::Location{textDocument->uri(), {textDocument->convertPosition(location.begin), textDocument->convertPosition(location.end)}});
 
@@ -686,7 +552,7 @@ lsp::ReferenceResult WorkspaceFolder::references(const lsp::ReferenceParams& par
     if (auto typeDefinition = node->as<Luau::AstStatTypeAlias>())
     {
         // Check to see whether the position was actually the type parameter: "S" in `type State<S> = ...`
-        if (handleIfTypeReferenceByPosition(typeDefinition, typeDefinition->generics, typeDefinition->genericPacks, position, result, textDocument))
+        if (handleIfTypeReferenceByPosition(*sourceModule, typeDefinition->generics, typeDefinition->genericPacks, position, result, textDocument))
         {
             return result;
         }
@@ -699,17 +565,10 @@ lsp::ReferenceResult WorkspaceFolder::references(const lsp::ReferenceParams& par
         }
         else
         {
-            // Include all usages of the type
-            auto references = findTypeReferences(*sourceModule, typeDefinition->name.value, std::nullopt);
-            result.reserve(references.size() + 1);
+            auto references = findTypeReferences(*sourceModule, typeDefinition->name.value, position);
             for (auto& location : references)
                 result.emplace_back(lsp::Location{
                     params.textDocument.uri, {textDocument->convertPosition(location.begin), textDocument->convertPosition(location.end)}});
-
-
-            // Include the type definition
-            result.emplace_back(lsp::Location{params.textDocument.uri, {textDocument->convertPosition(typeDefinition->nameLocation.begin),
-                                                                           textDocument->convertPosition(typeDefinition->nameLocation.end)}});
 
             return result;
         }
@@ -741,68 +600,32 @@ lsp::ReferenceResult WorkspaceFolder::references(const lsp::ReferenceParams& par
         }
         else
         {
-            // This could potentially be a generic type parameter - so we want to find its references if so.
-            auto ancestry = Luau::findAstAncestryOfPosition(*sourceModule, position, /* includeTypes= */ true);
-            for (auto it = ancestry.rbegin(); it != ancestry.rend(); ++it)
-            {
-                if (auto typeAlias = (*it)->as<Luau::AstStatTypeAlias>())
-                {
-                    if (handleIfTypeReferenceByName(typeAlias, typeAlias->generics, typeAlias->genericPacks, reference->name, result, textDocument))
-                        return result;
-                    break;
-                }
-                else if (auto typeFunction = (*it)->as<Luau::AstTypeFunction>())
-                {
-                    if (handleIfTypeReferenceByName(
-                            typeFunction, typeFunction->generics, typeFunction->genericPacks, reference->name, result, textDocument))
-                        return result;
-                }
-                else if (auto func = (*it)->as<Luau::AstExprFunction>())
-                {
-                    if (handleIfTypeReferenceByName(func, func->generics, func->genericPacks, reference->name, result, textDocument))
-                        return result;
-                    break;
-                }
-                else if (!(*it)->asType())
-                {
-                    // No longer inside a type, so no point going further
-                    break;
-                }
-            }
-
-            auto references = findTypeReferences(*sourceModule, reference->name.value, std::nullopt);
-            result.reserve(references.size() + 1);
+            auto references = findTypeReferences(*sourceModule, reference->name.value, position);
             for (auto& location : references)
                 result.emplace_back(lsp::Location{
                     params.textDocument.uri, {textDocument->convertPosition(location.begin), textDocument->convertPosition(location.end)}});
 
-            // Find the actual declaration location
-            auto scope = Luau::findScopeAtPosition(*module, position);
-            while (scope)
-            {
-                if (auto location = scope->typeAliasNameLocations.find(reference->name.value); location != scope->typeAliasNameLocations.end())
-                {
-                    result.emplace_back(lsp::Location{params.textDocument.uri,
-                        {textDocument->convertPosition(location->second.begin), textDocument->convertPosition(location->second.end)}});
-                    break;
-                }
-
-                scope = scope->parent;
-            }
-
             return result;
         }
     }
+    else if (auto genericPack = node->as<Luau::AstTypePackGeneric>())
+    {
+        auto references = findTypeReferences(*sourceModule, genericPack->genericName.value, position);
+        for (auto& location : references)
+            result.emplace_back(
+                lsp::Location{params.textDocument.uri, {textDocument->convertPosition(location.begin), textDocument->convertPosition(location.end)}});
+        return result;
+    }
     else if (auto typeFunction = node->as<Luau::AstTypeFunction>())
     {
-        if (handleIfTypeReferenceByPosition(typeFunction, typeFunction->generics, typeFunction->genericPacks, position, result, textDocument))
+        if (handleIfTypeReferenceByPosition(*sourceModule, typeFunction->generics, typeFunction->genericPacks, position, result, textDocument))
         {
             return result;
         }
     }
     else if (auto func = node->as<Luau::AstExprFunction>())
     {
-        if (handleIfTypeReferenceByPosition(func, func->generics, func->genericPacks, position, result, textDocument))
+        if (handleIfTypeReferenceByPosition(*sourceModule, func->generics, func->genericPacks, position, result, textDocument))
         {
             return result;
         }
