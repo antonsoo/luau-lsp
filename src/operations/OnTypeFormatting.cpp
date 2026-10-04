@@ -57,14 +57,15 @@ static bool isEscaped(const std::string& line, size_t idx)
     return backslashCount % 2 == 1;
 }
 
-static std::optional<size_t> findUnclosedChar(const std::string& line, size_t until, char ch)
+static std::optional<size_t> findUnclosedChar(
+    const std::string& line, const Luau::Position& position, char ch, const Luau::SourceModule& sourceModule)
 {
     size_t count = 0;
     std::optional<size_t> last;
 
-    for (size_t i = 0; i < until; ++i)
+    for (size_t i = 0; i < position.column; ++i)
     {
-        if (line[i] == ch && !isEscaped(line, i))
+        if (line[i] == ch && !isEscaped(line, i) && !Luau::isWithinComment(sourceModule, Luau::Position{position.line, static_cast<unsigned int>(i)}))
         {
             count++;
             last = i;
@@ -74,13 +75,13 @@ static std::optional<size_t> findUnclosedChar(const std::string& line, size_t un
     return (count % 2 == 1) ? last : std::nullopt;
 }
 
-static std::optional<std::vector<lsp::TextEdit>> convertQuotesByHeuristic(const TextDocument* textDocument, const Luau::Position& position)
+static std::optional<std::vector<lsp::TextEdit>> convertQuotesByHeuristic(
+    const TextDocument* textDocument, const Luau::Position& position, const Luau::SourceModule& sourceModule)
 {
     auto lineText = textDocument->getLine(position.line);
-    size_t column = position.column;
 
-    auto doublePos = findUnclosedChar(lineText, column, '"');
-    auto singlePos = findUnclosedChar(lineText, column, '\'');
+    auto doublePos = findUnclosedChar(lineText, position, '"', sourceModule);
+    auto singlePos = findUnclosedChar(lineText, position, '\'', sourceModule);
     if (!doublePos && !singlePos)
         return std::nullopt;
 
@@ -88,7 +89,7 @@ static std::optional<std::vector<lsp::TextEdit>> convertQuotesByHeuristic(const 
     size_t quotePos = std::min(doublePos.value_or(SIZE_MAX), singlePos.value_or(SIZE_MAX));
 
     // Skip if we are inside an unfinished interpolated string
-    if (findUnclosedChar(lineText, quotePos, '`'))
+    if (findUnclosedChar(lineText, Luau::Position{position.line, static_cast<unsigned int>(quotePos)}, '`', sourceModule))
         return std::nullopt;
 
     size_t contentPos = quotePos + 1;
@@ -130,8 +131,11 @@ lsp::DocumentOnTypeFormattingResult WorkspaceFolder::onTypeFormatting(const lsp:
     if (!sourceModule)
         return std::nullopt;
 
+    if (Luau::isWithinComment(*sourceModule, position))
+        return std::nullopt;
+
     if (auto* stringNode = findStringNodeAtPosition(*sourceModule, position))
         return convertQuotesForString(stringNode, textDocument, position);
 
-    return convertQuotesByHeuristic(textDocument, position);
+    return convertQuotesByHeuristic(textDocument, position, *sourceModule);
 }

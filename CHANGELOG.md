@@ -13,6 +13,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Fixed
 
 - Fixed `luau-lsp.format.convertQuotes` doing nothing, converting only the opening quote, or putting the closing backtick in the wrong place when `{` is typed inside a string. The conversion used the syntax tree from before the keystroke; the document is now re-parsed first ([#1344](https://github.com/JohnnyMorganz/luau-lsp/issues/1344))
+- Quote conversion no longer changes quotes inside comments or uses them to locate an unfinished string later on the same line
 
 ## [1.70.1] - 2026-09-27
 

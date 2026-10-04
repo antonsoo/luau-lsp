@@ -335,4 +335,82 @@ TEST_CASE_FIXTURE(Fixture, "on_type_formatting_handles_quote_after_another_unclo
     )");
 }
 
+TEST_CASE_FIXTURE(Fixture, "on_type_formatting_ignores_quotes_in_comments")
+{
+    client->globalConfig.format.convertQuotes = true;
+    const std::vector<std::string> comments = {
+        R"(-- "hello {|)",
+        R"(local x = 1 -- 'hello {|})",
+        R"(--[[ "hello {|} ]])",
+        "--[=[\n\"hello {|}\n]=]",
+        "--[==[\n'hello {|",
+        R"(--- "documentation {|})",
+    };
+
+    for (const auto& marked : comments)
+    {
+        auto [source, marker] = sourceWithMarker(marked);
+        auto edits = processOnTypeFormattingAfterEdit(this, "", source, marker);
+        CHECK_MESSAGE(!edits.has_value(), marked);
+    }
+}
+
+TEST_CASE_FIXTURE(Fixture, "on_type_formatting_uses_current_comment_locations")
+{
+    client->globalConfig.format.convertQuotes = true;
+    auto [source, marker] = sourceWithMarker(R"(-- "hello {|}")");
+
+    auto edits = processOnTypeFormattingAfterEdit(this, R"(local x = "hello ")", source, marker);
+    CHECK(!edits.has_value());
+}
+
+TEST_CASE_FIXTURE(Fixture, "on_type_formatting_converts_strings_containing_comment_markers")
+{
+    client->globalConfig.format.convertQuotes = true;
+    auto [source, marker] = sourceWithMarker(R"(local x = "--[[ hello {|}")");
+
+    auto edits = processOnTypeFormattingAfterEdit(this, R"(local x = "--[[ hello ")", source, marker);
+    REQUIRE(edits.has_value());
+    CHECK_EQ(applyEdit(source, *edits), "local x = `--[[ hello {}`");
+}
+
+TEST_CASE_FIXTURE(Fixture, "on_type_formatting_converts_unfinished_string_after_block_comment")
+{
+    client->globalConfig.format.convertQuotes = true;
+    auto [source, marker] = sourceWithMarker(R"(--[[comment]] local x = "hello {|)");
+
+    auto edits = processOnTypeFormattingAfterEdit(this, "--[[comment]] local x = ", source, marker);
+    REQUIRE(edits.has_value());
+    CHECK_EQ(applyEdit(source, *edits), "--[[comment]] local x = `hello {");
+}
+
+TEST_CASE_FIXTURE(Fixture, "on_type_formatting_converts_string_after_comment_removed")
+{
+    client->globalConfig.format.convertQuotes = true;
+    auto [source, marker] = sourceWithMarker(R"(local x = "hello {|}")");
+
+    auto edits = processOnTypeFormattingAfterEdit(this, R"(-- "hello ")", source, marker);
+    REQUIRE(edits.has_value());
+    CHECK_EQ(applyEdit(source, *edits), "local x = `hello {}`");
+}
+
+TEST_CASE_FIXTURE(Fixture, "on_type_formatting_ignores_quotes_in_preceding_block_comment")
+{
+    client->globalConfig.format.convertQuotes = true;
+    auto [source, marker] = sourceWithMarker(R"(--[[ " ]] local x = "hello {|)");
+
+    auto edits = processOnTypeFormattingAfterEdit(this, R"(--[[ " ]] local x = )", source, marker);
+    REQUIRE(edits.has_value());
+    CHECK_EQ(applyEdit(source, *edits), "--[[ \" ]] local x = `hello {");
+}
+
+TEST_CASE_FIXTURE(Fixture, "on_type_formatting_does_not_convert_comment_quote_before_table")
+{
+    client->globalConfig.format.convertQuotes = true;
+    auto [source, marker] = sourceWithMarker(R"(--[[ " ]] local x = {|})");
+
+    auto edits = processOnTypeFormattingAfterEdit(this, R"(--[[ " ]] local x = )", source, marker);
+    CHECK(!edits.has_value());
+}
+
 TEST_SUITE_END();
