@@ -10,7 +10,7 @@
 #include "Luau/Ast.h"
 #include "Luau/Error.h"
 
-#include <unordered_set>
+#include <algorithm>
 
 LUAU_FASTFLAG(LuauSolverV2)
 
@@ -56,6 +56,27 @@ Luau::AstStat* findStatementContainingLocal(Luau::AstStatBlock* root, const Luau
     FindStatementContainingLocal finder(location);
     root->visit(&finder);
     return finder.result;
+}
+
+lsp::Range getStatementDeletionRange(const TextDocument& textDocument, const Luau::Location& location)
+{
+    const auto firstLine = textDocument.getLine(location.begin.line);
+    const auto lastLine = textDocument.getLine(location.end.line);
+    auto endColumn = location.end.column;
+    if (endColumn < lastLine.size() && lastLine[endColumn] == ';')
+        ++endColumn;
+
+    // Remove the whole line only when it contains no neighbouring code or comments.
+    if (firstLine.substr(0, location.begin.column).find_first_not_of(" \t\r") == std::string::npos &&
+        lastLine.substr(endColumn).find_first_not_of(" \t\r") == std::string::npos)
+    {
+        auto end = location.end.line + 1 < textDocument.lineCount()
+                       ? lsp::Position{location.end.line + 1, 0}
+                       : textDocument.convertPosition(Luau::Position{location.end.line, static_cast<unsigned>(lastLine.size())});
+        return {{location.begin.line, 0}, end};
+    }
+
+    return textDocument.convertLocation({location.begin, {location.end.line, endColumn}});
 }
 
 // Find a matching diagnostic from the client-provided diagnostics by location
@@ -140,6 +161,10 @@ void generateUnusedCodeFixes(const lsp::DocumentUri& uri, const Luau::LintWarnin
     // Fix 2: Delete the declaration/statement
     if (auto statement = findStatementContainingLocal(root, lint.location))
     {
+        // Removing one binding from a shared declaration can change value assignment.
+        if (auto local = statement->as<Luau::AstStatLocal>(); local && local->vars.size > 1)
+            return;
+
         lsp::CodeAction action;
         action.title = std::string("Remove unused ") + kindLabel + ": '" + name + "'";
         action.kind = lsp::CodeActionKind::QuickFix;
@@ -148,7 +173,7 @@ void generateUnusedCodeFixes(const lsp::DocumentUri& uri, const Luau::LintWarnin
         if (diagnostic)
             action.diagnostics.push_back(*diagnostic);
 
-        lsp::Range deleteRange{{statement->location.begin.line, 0}, {statement->location.end.line + 1, 0}};
+        auto deleteRange = getStatementDeletionRange(textDocument, statement->location);
         lsp::TextEdit edit{deleteRange, ""};
 
         lsp::WorkspaceEdit workspaceEdit;
@@ -171,7 +196,7 @@ void generateUnreachableCodeFix(const lsp::DocumentUri& uri, const Luau::LintWar
         action.diagnostics.push_back(*diagnostic);
 
     // Delete the entire unreachable statement (the lint location is the unreachable statement)
-    lsp::Range deleteRange{{lint.location.begin.line, 0}, {lint.location.end.line + 1, 0}};
+    auto deleteRange = getStatementDeletionRange(textDocument, lint.location);
     lsp::TextEdit edit{deleteRange, ""};
 
     lsp::WorkspaceEdit workspaceEdit;
@@ -394,7 +419,22 @@ lsp::CodeActionResult WorkspaceFolder::codeAction(const lsp::CodeActionParams& p
 
         // Add "Remove all unused code" source action
         std::vector<lsp::TextEdit> edits;
-        std::unordered_set<size_t> deletedLines;
+        auto addDeletion = [&](const Luau::Location& location)
+        {
+            auto range = getStatementDeletionRange(*textDocument, location);
+            for (const auto& edit : edits)
+                if (!(range.start < edit.range.start) && !(edit.range.end < range.end))
+                    return;
+
+            // Keep the enclosing deletion instead of overlapping nested edits.
+            edits.erase(std::remove_if(edits.begin(), edits.end(),
+                            [&](const auto& edit)
+                            {
+                                return !(edit.range.start < range.start) && !(range.end < edit.range.end);
+                            }),
+                edits.end());
+            edits.push_back({range, ""});
+        };
 
         for (const auto& lint : cr.lintResult.warnings)
         {
@@ -403,28 +443,28 @@ lsp::CodeActionResult WorkspaceFolder::codeAction(const lsp::CodeActionParams& p
             {
                 if (auto statement = findStatementContainingLocal(sourceModule->root, lint.location))
                 {
-                    size_t startLine = statement->location.begin.line;
-                    if (deletedLines.find(startLine) == deletedLines.end())
+                    if (auto local = statement->as<Luau::AstStatLocal>(); local && local->vars.size > 1)
                     {
-                        lsp::Range deleteRange{{statement->location.begin.line, 0}, {statement->location.end.line + 1, 0}};
-                        edits.push_back({deleteRange, ""});
-
-                        for (size_t line = statement->location.begin.line; line <= statement->location.end.line; ++line)
-                            deletedLines.insert(line);
+                        bool allUnused = std::all_of(local->vars.begin(), local->vars.end(),
+                            [&](const auto* var)
+                            {
+                                return std::any_of(cr.lintResult.warnings.begin(), cr.lintResult.warnings.end(),
+                                    [&](const auto& warning)
+                                    {
+                                        return warning.location == var->location && (warning.code == Luau::LintWarning::Code_LocalUnused ||
+                                                                                        warning.code == Luau::LintWarning::Code_FunctionUnused ||
+                                                                                        warning.code == Luau::LintWarning::Code_ImportUnused);
+                                    });
+                            });
+                        if (!allUnused)
+                            continue;
                     }
+                    addDeletion(statement->location);
                 }
             }
             else if (lint.code == Luau::LintWarning::Code_UnreachableCode)
             {
-                size_t startLine = lint.location.begin.line;
-                if (deletedLines.find(startLine) == deletedLines.end())
-                {
-                    lsp::Range deleteRange{{lint.location.begin.line, 0}, {lint.location.end.line + 1, 0}};
-                    edits.push_back({deleteRange, ""});
-
-                    for (size_t line = lint.location.begin.line; line <= lint.location.end.line; ++line)
-                        deletedLines.insert(line);
-                }
+                addDeletion(lint.location);
             }
         }
 

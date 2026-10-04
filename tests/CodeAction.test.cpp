@@ -3,6 +3,8 @@
 #include "RobloxTestConstants.h"
 #include "Platform/RobloxPlatform.hpp"
 
+#include <algorithm>
+
 TEST_SUITE_BEGIN("CodeAction");
 
 TEST_CASE_FIXTURE(Fixture, "organise_imports_action_is_returned")
@@ -766,6 +768,123 @@ TEST_CASE_FIXTURE(Fixture, "sourcemap_unknown_symbol_fix_suggests_string_require
         local ModuleB = require("./ModuleB")
         local x = ModuleB
     )"));
+}
+
+static std::string applyCodeActionEdits(const TextDocument& document, std::vector<lsp::TextEdit> edits)
+{
+    std::sort(edits.begin(), edits.end(),
+        [](const auto& lhs, const auto& rhs)
+        {
+            return rhs.range.start < lhs.range.start;
+        });
+    auto source = document.getText();
+    for (const auto& edit : edits)
+    {
+        auto start = document.offsetAt(edit.range.start);
+        source.replace(start, document.offsetAt(edit.range.end) - start, edit.newText);
+    }
+    return source;
+}
+
+TEST_CASE_FIXTURE(Fixture, "unused_deletion_keeps_partly_used_local_declarations")
+{
+    size_t index = 0;
+    for (const std::string source : {"local used, unused = 1, 2\nreturn used\n", "local unused, used = 1, 2\nreturn used\n",
+             "local function values() return 1, 2 end\nlocal used, unused = values()\nreturn used\n"})
+    {
+        auto uri = newDocument("mixed-" + std::to_string(index++) + ".luau", source);
+        lsp::CodeActionParams params;
+        params.textDocument.uri = uri;
+        params.range = {{0, 0}, workspace.fileResolver.getTextDocument(uri)->positionAt(source.size())};
+        params.context.only = {lsp::CodeActionKind::QuickFix, lsp::CodeActionKind::Source};
+        auto result = workspace.codeAction(params, nullptr);
+        CHECK_FALSE(findCodeAction(result, "Remove unused variable: 'unused'"));
+        CHECK_FALSE(findCodeAction(result, "Remove all unused code"));
+        auto prefix = findCodeAction(result, "Prefix 'unused' with '_' to silence");
+        REQUIRE(prefix);
+        REQUIRE(prefix->edit);
+        auto edited = applyCodeActionEdits(*workspace.fileResolver.getTextDocument(uri), prefix->edit->changes.at(uri));
+        CHECK(edited.find("_unused") != std::string::npos);
+        CHECK(check(edited).errors.empty());
+    }
+}
+
+TEST_CASE_FIXTURE(Fixture, "unused_deletion_preserves_neighbouring_statements")
+{
+    struct Example
+    {
+        const char* source;
+        const char* expected;
+        const char* title;
+    };
+    size_t index = 0;
+    for (const auto& example : {
+             Example{"local used = 1; local unused = 2; return used\n", "local used = 1;  return used\n", "Remove unused variable: 'unused'"},
+             Example{"local used = \"😀é\"; local unused = 2; return used\r\n", "local used = \"😀é\";  return used\r\n",
+                 "Remove unused variable: 'unused'"},
+             Example{"local used = 1\nif true then local unused = 2; used += 1 end\nreturn used\n",
+                 "local used = 1\nif true then  used += 1 end\nreturn used\n", "Remove unused variable: 'unused'"},
+             Example{"local used = 1; local function unused() return 2 end; return used\n", "local used = 1;  return used\n",
+                 "Remove unused function: 'unused'"},
+             Example{"local used = 1; local function unused()\nreturn 2\nend; return used\n", "local used = 1;  return used\n",
+                 "Remove unused function: 'unused'"},
+             Example{"local function used() error(\"done\"); print(\"unreachable\") end\nreturn used\n",
+                 "local function used() error(\"done\");  end\nreturn used\n", "Remove unreachable code"},
+             Example{"local function used()\nerror(\"done\"); print(\"unreachable\"); print(\"also\")\nend\nreturn used\n",
+                 "local function used()\nerror(\"done\");  print(\"also\")\nend\nreturn used\n", "Remove unreachable code"},
+             Example{"-- keep comment\nlocal unused = 2 -- keep trailing comment\nreturn 7\n",
+                 "-- keep comment\n -- keep trailing comment\nreturn 7\n", "Remove unused variable: 'unused'"},
+             Example{"local unused = 2", "", "Remove unused variable: 'unused'"},
+         })
+    {
+        CAPTURE(example.source);
+        std::string source = example.source;
+        auto uri = newDocument("neighbours-" + std::to_string(index++) + ".luau", source);
+        lsp::CodeActionParams params;
+        params.textDocument.uri = uri;
+        params.range = {{0, 0}, workspace.fileResolver.getTextDocument(uri)->positionAt(source.size())};
+        params.context.only = {lsp::CodeActionKind::QuickFix, lsp::CodeActionKind::Source};
+        auto result = workspace.codeAction(params, nullptr);
+        for (const std::string title : {example.title, "Remove all unused code"})
+        {
+            auto action = findCodeAction(result, title);
+            REQUIRE(action);
+            REQUIRE(action->edit);
+            auto edited = applyCodeActionEdits(*workspace.fileResolver.getTextDocument(uri), action->edit->changes.at(uri));
+            CHECK_EQ(edited, example.expected);
+            CHECK(check(edited).errors.empty());
+        }
+    }
+}
+
+TEST_CASE_FIXTURE(Fixture, "bulk_unused_deletion_uses_disjoint_ranges")
+{
+    size_t index = 0;
+    for (const auto& [source, expected] : std::vector<std::pair<std::string, std::string>>{
+             {"local first = 1; local second = 2; return 7\n", "  return 7\n"},
+             {"local function unused()\nlocal inner = 2\nend\nreturn 7\n", "return 7\n"},
+             {"local first, second = 1, 2\nreturn 7\n", "return 7\n"},
+             {"local used, unused = 1, 2\nlocal spare = 3\nreturn used\n", "local used, unused = 1, 2\nreturn used\n"},
+         })
+    {
+        CAPTURE(source);
+        auto uri = newDocument("bulk-" + std::to_string(index++) + ".luau", source);
+        lsp::CodeActionParams params;
+        params.textDocument.uri = uri;
+        params.range = {{0, 0}, workspace.fileResolver.getTextDocument(uri)->positionAt(source.size())};
+        params.context.only = {lsp::CodeActionKind::Source};
+        auto result = workspace.codeAction(params, nullptr);
+        auto action = findCodeAction(result, "Remove all unused code");
+        REQUIRE(action);
+        REQUIRE(action->edit);
+        auto& changes = action->edit->changes.at(uri);
+        for (size_t i = 0; i < changes.size(); ++i)
+            for (size_t j = i + 1; j < changes.size(); ++j)
+                CHECK_FALSE((changes[i].range.start < changes[j].range.end && changes[j].range.start < changes[i].range.end));
+        auto edited = applyCodeActionEdits(*workspace.fileResolver.getTextDocument(uri), changes);
+        CHECK_EQ(edited, expected);
+        CHECK(check(edited).errors.empty());
+    }
 }
 
 TEST_SUITE_END();
