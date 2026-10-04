@@ -156,7 +156,14 @@ Luau::ToStringResult toStringReturnTypeDetailed(Luau::TypePackId retTypes, Luau:
 
     auto result = Luau::toStringDetailed(retTypes, options);
     if (wrap)
+    {
         result.name = "(" + result.name + ")";
+        for (auto& span : result.typeSpans)
+        {
+            span.startPos++;
+            span.endPos++;
+        }
+    }
     return result;
 }
 

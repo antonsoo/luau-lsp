@@ -1079,4 +1079,74 @@ TEST_CASE_FIXTURE(Fixture, "inlay_hint_does_not_crash_on_truncated_intersection_
     REQUIRE_GE(result.size(), 1);
 }
 
+TEST_CASE_FIXTURE(Fixture, "inlay_hint_return_links_cover_named_types_in_wrapped_and_unwrapped_packs")
+{
+    client->globalConfig.inlayHints.functionReturnTypes = true;
+    std::string body;
+    std::vector<std::string> expected;
+    SUBCASE("single return")
+    {
+        body = "local function copy(value: Item)| return value end";
+        expected = {"Item"};
+    }
+    SUBCASE("named and primitive tuple")
+    {
+        body = "local function copy(value: Item)| return value, 1 end";
+        expected = {"Item"};
+    }
+    SUBCASE("two named returns")
+    {
+        body = "local function copy(value: Item, other: Other)| return value, other end";
+        expected = {"Item", "Other"};
+    }
+    SUBCASE("fixed and variadic returns")
+    {
+        body = "local function copy(value: Item, ...: Item)| return value, ... end";
+        expected = {"Item", "Item"};
+    }
+    SUBCASE("only variadic returns")
+    {
+        body = "local function copy(...: Item)| return ... end";
+        expected = {"Item"};
+    }
+
+    auto [source, position] = sourceWithMarker("type Item = { value: number }\ntype Other = { other: string }\n" + body);
+    auto uri = newDocument("foo.luau", source);
+    lsp::InlayHintParams params;
+    params.textDocument = lsp::TextDocumentIdentifier{uri};
+    auto hints = workspace.inlayHint(params, nullptr);
+    REQUIRE_EQ(hints.size(), 1);
+    CHECK_EQ(hints[0].position, position);
+
+    std::vector<std::string> linked;
+    for (const auto& part : hints[0].label)
+    {
+        if (part.location)
+        {
+            linked.push_back(part.value);
+            CHECK_EQ(part.location->uri, uri);
+            if (linked.size() <= expected.size())
+            {
+                auto range = expected[linked.size() - 1] == "Item" ? lsp::Range{{0, 12}, {0, 29}} : lsp::Range{{1, 13}, {1, 30}};
+                CHECK_EQ(part.location->range, range);
+            }
+        }
+    }
+    CHECK_EQ(linked, expected);
+}
+
+TEST_CASE_FIXTURE(Fixture, "inlay_hint_return_tuple_links_cover_types_nested_in_function_signatures")
+{
+    client->globalConfig.inlayHints.functionReturnTypes = true;
+    auto source = "type Item = { value: number }\ntype Other = { other: string }\n"
+                  "local function copy(value: Item) return value, function(x: Other): Item return value end end";
+    auto hints = processInlayHint(this, source);
+    REQUIRE_EQ(hints.size(), 1);
+    std::vector<std::string> linked;
+    for (const auto& part : hints[0].label)
+        if (part.location)
+            linked.push_back(part.value);
+    CHECK_EQ(linked, std::vector<std::string>{"Item", "Other", "Item"});
+}
+
 TEST_SUITE_END();
