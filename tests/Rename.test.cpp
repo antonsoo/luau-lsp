@@ -587,6 +587,53 @@ TEST_CASE_FIXTURE(Fixture, "rename_property_from_bracket_notation_definition_in_
     )");
 }
 
+TEST_CASE_FIXTURE(Fixture, "rename_property_preserves_long_string_delimiters")
+{
+    for (size_t level : {0, 1, 2, 5, 20})
+    {
+        for (const std::string newline : {"", "\n", "\r\n"})
+        {
+            for (bool fromDeclaration : {false, true})
+            {
+                CAPTURE(level);
+                CAPTURE(newline);
+                CAPTURE(fromDeclaration);
+                auto opening = "[" + std::string(level, '=') + "[";
+                auto closing = "]" + std::string(level, '=') + "]";
+                auto markedLiteral = opening + newline + "|name" + closing;
+                auto literal = opening + newline + "name" + closing;
+                auto renamedLiteral = opening + newline + "Renamed" + closing;
+                auto [source, position] = sourceWithMarker("local T = {[ " + (fromDeclaration ? markedLiteral : literal) + " ] = 1}\nlocal a = T." +
+                                                           (fromDeclaration ? "name" : "|name") + "\nlocal b = T[ " + literal +
+                                                           " ]\nlocal c = T[\"name\"]\nreturn a+b+c\n");
+                auto uri = newDocument(
+                    "raw-" + std::to_string(level) + "-" + std::to_string(newline.size()) + "-" + std::to_string(fromDeclaration) + ".luau", source);
+                lsp::RenameParams params{{{uri}, position}, "Renamed"};
+                auto result = workspace.rename(params, nullptr);
+                REQUIRE(result);
+                REQUIRE(result->changes.size() == 1);
+                auto edited = applyEdit(source, result->changes.at(uri));
+                CHECK_EQ(edited, "local T = {[ " + renamedLiteral + " ] = 1}\nlocal a = T.Renamed\nlocal b = T[ " + renamedLiteral +
+                                     " ]\nlocal c = T[\"Renamed\"]\nreturn a+b+c\n");
+                CHECK(check(edited).errors.empty());
+            }
+        }
+    }
+}
+
+TEST_CASE_FIXTURE(Fixture, "rename_property_replaces_multiline_string_content")
+{
+    auto [source, position] = sourceWithMarker("local T = {[ [==[first\nsecond]==] ] = 1}\nlocal v = T[ [==[first|\nsecond]==] ]\nreturn v\n");
+    auto uri = newDocument("multiline.luau", source);
+    lsp::RenameParams params{{{uri}, position}, "Renamed"};
+    auto result = workspace.rename(params, nullptr);
+    REQUIRE(result);
+    REQUIRE(result->changes.size() == 1);
+    auto edited = applyEdit(source, result->changes.at(uri));
+    CHECK_EQ(edited, "local T = {[ [==[Renamed]==] ] = 1}\nlocal v = T[ [==[Renamed]==] ]\nreturn v\n");
+    CHECK(check(edited).errors.empty());
+}
+
 TEST_CASE_FIXTURE(Fixture, "rename_method_through_metatable_inheritance")
 {
     auto source = R"(

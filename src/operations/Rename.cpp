@@ -113,7 +113,29 @@ static std::optional<lsp::Range> getAdjustedRangeIfQuotedString(WorkspaceFolder*
         }
     }
 
-    return lsp::Range{{location.range.start.line, location.range.start.character + 1}, {location.range.end.line, location.range.end.character - 1}};
+    auto start = location.range.start;
+    auto end = location.range.end;
+    size_t delimiterLength = 1;
+    if (constantString->quoteStyle == Luau::AstExprConstantString::QuoteStyle::QuotedRaw)
+    {
+        const auto source = textDocument->getText(textDocument->convertLocation(constantString->location));
+        const auto openingEnd = source.find('[', 1);
+        if (openingEnd == std::string::npos)
+            return std::nullopt;
+
+        delimiterLength = openingEnd + 1;
+        // Luau ignores an initial newline after a long-string opening delimiter.
+        // Preserve it rather than joining the content onto the delimiter's line.
+        if (source.size() > delimiterLength && (source[delimiterLength] == '\n' || source[delimiterLength] == '\r'))
+            start = {start.line + 1, 0};
+        else
+            start.character += delimiterLength;
+    }
+    else
+        start.character += delimiterLength;
+
+    end.character -= delimiterLength;
+    return lsp::Range{start, end};
 }
 
 lsp::RenameResult WorkspaceFolder::rename(const lsp::RenameParams& params, const LSPCancellationToken& cancellationToken)

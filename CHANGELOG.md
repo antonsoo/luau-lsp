@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Preserve long-string delimiters when renaming table properties written with bracket notation
+
 ### Changed
 
 - Sync to upstream Luau 0.741
